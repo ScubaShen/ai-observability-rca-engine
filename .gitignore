@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+runtime/output/*.jsonl
+!runtime/output/.gitkeep
+# Runtime state directories are local database files, not source assets.
+runtime/postgres/
+runtime/neo4j/
