@@ -9,6 +9,21 @@ def _csv_env(name: str, default: str) -> list[str]:
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
 
 
+def _env(name: str, legacy_name: str | None = None, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is not None:
+        return value
+    if legacy_name:
+        legacy_value = os.getenv(legacy_name)
+        if legacy_value is not None:
+            return legacy_value
+    return default
+
+
+def _bool_env(name: str, legacy_name: str | None = None, default: str = "false") -> bool:
+    return _env(name, legacy_name, default).lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     kafka_bootstrap_servers: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
@@ -45,11 +60,17 @@ class Settings:
     neo4j_password: str = os.getenv("NEO4J_PASSWORD", "")
     rag_embedding_dimensions: int = int(os.getenv("RAG_EMBEDDING_DIMENSIONS", "1536"))
     rag_cache_ttl_seconds: int = int(os.getenv("RAG_CACHE_TTL_SECONDS", "300"))
-    llm_enabled: bool = os.getenv("RAG_LLM_ENABLED", "false").lower() == "true"
-    llm_api_url: str = os.getenv("RAG_LLM_API_URL", "")
-    llm_api_key: str = os.getenv("RAG_LLM_API_KEY", "")
-    llm_model: str = os.getenv("RAG_LLM_MODEL", "")
-    llm_timeout_seconds: float = float(os.getenv("RAG_LLM_TIMEOUT_SECONDS", "20"))
+    llm_provider: str = _env("LLM_PROVIDER", default="disabled")
+    llm_enabled: bool = _bool_env("LLM_ENABLED", "RAG_LLM_ENABLED", "false")
+    llm_api_url: str = _env("LLM_API_URL", "RAG_LLM_API_URL", "")
+    llm_api_key: str = _env("LLM_API_KEY", "RAG_LLM_API_KEY", "")
+    llm_model: str = _env("LLM_MODEL", "RAG_LLM_MODEL", "")
+    llm_reasoning_effort: str = _env("LLM_REASONING_EFFORT", default="medium")
+    llm_temperature: float = float(_env("LLM_TEMPERATURE", default="0.1"))
+    llm_max_output_tokens: int = int(_env("LLM_MAX_OUTPUT_TOKENS", default="1200"))
+    llm_timeout_seconds: float = float(_env("LLM_TIMEOUT_SECONDS", "RAG_LLM_TIMEOUT_SECONDS", "20"))
+    llm_streaming_enabled: bool = _bool_env("LLM_STREAMING_ENABLED", default="false")
+    llm_rerank_enabled: bool = _bool_env("LLM_RERANK_ENABLED", default="false")
 
     @property
     def output_dir(self) -> Path:

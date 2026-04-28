@@ -53,4 +53,9 @@ def test_rca_orchestrator_produces_ranked_result(tmp_path):
 
     assert result.status == "analyzed"
     assert result.root_causes[0].category == "application"
+    assert result.evidence_score > 0.8
+    assert result.evidence_strength == "strong"
+    assert result.reasoning_steps
+    assert result.evidence[0].scoring_factors
+    assert result.evidence[0].strength in {"medium", "strong"}
     assert len(result.timeline) == 2

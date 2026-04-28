@@ -10,8 +10,9 @@ from rca_engine.models import (
     PostmortemDraft,
     RAGQueryTrace,
 )
-from rca_engine.rag.llm import LLMSettings, OpenAICompatibleLLM
 from rca_engine.rag.embedding import HashEmbeddingProvider
+from rca_engine.rag.llm import LLMProvider, LLMResult, LLMSettings, build_llm_provider
+from rca_engine.rag.llm_reranker import LLMReranker
 from rca_engine.rag.retriever import KnowledgeRetriever
 from rca_engine.rag.verification import citations_from_matches, verify_answer
 
@@ -23,16 +24,17 @@ class RCACopilot:
         llm_settings: LLMSettings | None = None,
         cache_ttl_seconds: int = 300,
         embedding_provider: HashEmbeddingProvider | None = None,
+        llm_provider: LLMProvider | None = None,
     ) -> None:
         self.store = store
         self.retriever = KnowledgeRetriever(store, embedding_provider=embedding_provider)
-        self.llm = OpenAICompatibleLLM(llm_settings or LLMSettings())
+        self.llm_settings = llm_settings or LLMSettings()
+        self.llm = llm_provider or build_llm_provider(self.llm_settings)
+        self.llm_reranker = LLMReranker(self.llm, enabled=self.llm_settings.rerank_enabled)
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cache: dict[str, tuple[float, CopilotResponse]] = {}
 
     def answer(self, request: CopilotRequest) -> CopilotResponse:
-        # The cache keeps repeated operator queries cheap, but the response still
-        # goes through trace recording so evaluation views can reflect cache hits.
         started = time.monotonic()
         cache_key = stable_id("copilot_cache", request.model_dump(mode="json"))
         cached = self._cache.get(cache_key)
@@ -47,14 +49,28 @@ class RCACopilot:
             limit=request.limit,
         )
         response_path = _response_path(request.mode, intent.needs_llm, self.llm.available())
-        answer = None
+        rerank_strategy = "deterministic"
         if response_path == "deep":
-            answer = self.llm.complete(question=request.question, context=matches[:8])
+            reranked = self.llm_reranker.rerank(request.question, matches)
+            if [item.ref_id for item in reranked] != [item.ref_id for item in matches]:
+                rerank_strategy = "llm"
+                matches = reranked
+
+        llm_result: LLMResult | None = None
+        fallback_reason: str | None = None
+        answer: str | None = None
+        if response_path == "deep":
+            llm_result = self.llm.complete(question=request.question, context=matches[:8])
+            if llm_result and llm_result.answer:
+                answer = llm_result.answer
+            elif llm_result and llm_result.fallback_reason:
+                fallback_reason = llm_result.fallback_reason
+
         if not answer:
-            # The deterministic path is the reliability baseline. Optional LLM
-            # synthesis can improve phrasing, but must not be required to answer.
             response_path = "fast" if matches else "fallback"
             answer = _compose_answer(request.question, matches)
+            fallback_reason = fallback_reason or "llm_unavailable_or_empty"
+
         citations = citations_from_matches(matches)
         verification = verify_answer(answer, matches, citations)
         if verification.blocked_terms:
@@ -62,24 +78,124 @@ class RCACopilot:
             answer = _compose_answer(request.question, matches)
             answer += "\n\nAutomatic execution is out of scope. Use manual investigation and runbook steps only."
             verification = verify_answer(answer, matches, citations)
-        confidence = _confidence(matches, verification.status)
+            fallback_reason = "forbidden_automation_language"
+
+        structured = llm_result.structured if llm_result else {}
         latency_ms = int((time.monotonic() - started) * 1000)
         response = CopilotResponse(
             question=request.question,
             incident_id=request.incident_id,
             answer=answer,
-            confidence=confidence,
+            confidence=_confidence(matches, verification.status),
+            root_cause_summary=_optional_string(structured.get("root_cause_summary")),
+            missing_evidence=_string_list(structured.get("missing_evidence")),
+            recommended_manual_runbooks=_string_list(structured.get("recommended_manual_runbooks")),
+            confidence_rationale=_optional_string(structured.get("confidence_rationale")),
+            matches=matches,
+            citations=citations,
+            verification=verification,
+            suggested_followups=_string_list(structured.get("follow_up_questions")) or _followups(matches),
+            latency_ms=latency_ms,
+            cache_hit=False,
+            response_path=response_path,
+        )
+        self._cache[cache_key] = (time.monotonic(), response)
+        self._record_trace(
+            request,
+            intent.intent,
+            response,
+            latency_ms,
+            llm_result=llm_result,
+            rerank_strategy=rerank_strategy,
+            fallback_reason=fallback_reason,
+        )
+        return response
+
+    def stream_answer(self, request: CopilotRequest):
+        if request.mode != "deep" or not self.llm.available() or not self.llm_settings.streaming_enabled:
+            response = self.answer(request)
+            yield "event: metadata\n"
+            yield f"data: {response.model_dump_json(exclude={'answer'})}\n\n"
+            yield "event: answer\n"
+            yield f"data: {response.answer}\n\n"
+            return
+
+        started = time.monotonic()
+        intent, matches = self.retriever.search_with_intent(
+            query=request.question,
+            incident_id=request.incident_id,
+            limit=request.limit,
+        )
+        rerank_strategy = "deterministic"
+        reranked = self.llm_reranker.rerank(request.question, matches)
+        if [item.ref_id for item in reranked] != [item.ref_id for item in matches]:
+            rerank_strategy = "llm"
+            matches = reranked
+        citations = citations_from_matches(matches)
+        metadata = {
+            "question": request.question,
+            "incident_id": request.incident_id,
+            "matches": [item.model_dump(mode="json") for item in matches],
+            "citations": [item.model_dump(mode="json") for item in citations],
+            "response_path": "deep_stream",
+            "cache_hit": False,
+        }
+        yield "event: metadata\n"
+        yield f"data: {CopilotResponse(answer='', confidence=0.0, **metadata).model_dump_json(exclude={'answer'})}\n\n"
+
+        chunks: list[str] = []
+        for chunk in self.llm.stream(question=request.question, context=matches[:8]):
+            if not chunk:
+                continue
+            chunks.append(str(chunk))
+            yield "event: answer\n"
+            yield f"data: {str(chunk)}\n\n"
+
+        answer = "".join(chunks).strip()
+        fallback_reason = None
+        if not answer:
+            answer = _compose_answer(request.question, matches)
+            fallback_reason = "stream_empty"
+            yield "event: answer\n"
+            yield f"data: {answer}\n\n"
+        verification = verify_answer(answer, matches, citations)
+        if verification.blocked_terms:
+            answer = _compose_answer(request.question, matches)
+            answer += "\n\nAutomatic execution is out of scope. Use manual investigation and runbook steps only."
+            verification = verify_answer(answer, matches, citations)
+            fallback_reason = "forbidden_automation_language"
+            yield "event: answer\n"
+            yield f"data: \n\n{answer}\n\n"
+        latency_ms = int((time.monotonic() - started) * 1000)
+        response = CopilotResponse(
+            question=request.question,
+            incident_id=request.incident_id,
+            answer=answer,
+            confidence=_confidence(matches, verification.status),
             matches=matches,
             citations=citations,
             verification=verification,
             suggested_followups=_followups(matches),
             latency_ms=latency_ms,
             cache_hit=False,
-            response_path=response_path,
+            response_path="deep_stream" if not fallback_reason else "fallback",
         )
-        self._cache[cache_key] = (time.monotonic(), response)
-        self._record_trace(request, intent.intent, response, latency_ms)
-        return response
+        self._record_trace(
+            request,
+            intent.intent,
+            response,
+            latency_ms,
+            llm_result=LLMResult(
+                answer=answer,
+                provider=self.llm_settings.provider,
+                model=self.llm_settings.model,
+                reasoning_effort=self.llm_settings.reasoning_effort,
+            ),
+            rerank_strategy=rerank_strategy,
+            fallback_reason=fallback_reason,
+        )
+        yield "event: final\n"
+        yield f"data: {response.model_dump_json(exclude={'answer'})}\n\n"
 
     def postmortem_draft(self, incident_id: str) -> PostmortemDraft:
         result = self.store.get_rca_result(incident_id)
@@ -93,7 +209,9 @@ class RCACopilot:
                 detection="Detection details are not available.",
             )
         report = self.store.get_agent_report(incident_id) or {}
-        matches = self.retriever.search("postmortem root cause evidence runbook", incident_id=incident_id, limit=6)
+        matches = self.retriever.search(
+            "postmortem root cause evidence runbook", incident_id=incident_id, limit=6
+        )
         citations = citations_from_matches(matches)
         return PostmortemDraft(
             incident_id=incident_id,
@@ -121,6 +239,9 @@ class RCACopilot:
         intent: str,
         response: CopilotResponse,
         latency_ms: int,
+        llm_result: LLMResult | None = None,
+        rerank_strategy: str = "deterministic",
+        fallback_reason: str | None = None,
     ) -> None:
         if not hasattr(self.store, "save_rag_query_trace"):
             return
@@ -141,9 +262,21 @@ class RCACopilot:
             selected_context=response.citations,
             final_answer=response.answer,
             latency_ms=latency_ms,
+            token_cost=llm_result.token_cost if llm_result else 0.0,
             cache_hit=response.cache_hit,
             response_path=response.response_path,
             verification=response.verification,
+            llm_provider=llm_result.provider if llm_result else self.llm_settings.provider,
+            llm_model=llm_result.model if llm_result else self.llm_settings.model,
+            reasoning_effort=(
+                llm_result.reasoning_effort if llm_result else self.llm_settings.reasoning_effort
+            ),
+            prompt_tokens=llm_result.prompt_tokens if llm_result else 0,
+            completion_tokens=llm_result.completion_tokens if llm_result else 0,
+            recall_source_counts=_recall_source_counts(response.matches),
+            rerank_strategy=rerank_strategy,
+            top_score_breakdown=response.matches[0].score_breakdown if response.matches else {},
+            fallback_reason=fallback_reason,
         )
         self.store.save_rag_query_trace(trace)
 
@@ -225,3 +358,26 @@ def _top_root_cause(result: dict) -> str:
         return "Root cause is not confirmed."
     top = root_causes[0]
     return f"{top.get('title')}: {top.get('description')}"
+
+
+def _optional_string(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _string_list(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
+
+
+def _recall_source_counts(matches: list[KnowledgeMatch]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for match in matches:
+        for source in match.recall_sources:
+            counts[source] = counts.get(source, 0) + 1
+    return counts

@@ -29,6 +29,8 @@ class EvidenceFinding(BaseModel):
     severity: Severity
     summary: str
     confidence: float
+    scoring_factors: dict[str, float] = Field(default_factory=dict)
+    strength: str = "weak"
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -56,6 +58,7 @@ class RootCauseHypothesis(BaseModel):
     description: str
     category: str
     confidence: float
+    evidence_score: float = 0.0
     supporting_event_ids: list[str] = Field(default_factory=list)
     causal_link_ids: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
@@ -70,6 +73,10 @@ class RCAResult(BaseModel):
     severity: Severity
     summary: str
     confidence: float
+    evidence_score: float = 0.0
+    evidence_strength: str = "weak"
+    missing_evidence: list[str] = Field(default_factory=list)
+    reasoning_steps: list[str] = Field(default_factory=list)
     root_causes: list[RootCauseHypothesis] = Field(default_factory=list)
     causal_links: list[CausalLink] = Field(default_factory=list)
     timeline: list[TimelineEntry] = Field(default_factory=list)

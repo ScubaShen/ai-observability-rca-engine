@@ -20,6 +20,8 @@ from rca_engine.rag.embedding import cosine_similarity
 from rca_engine.storage.jsonl import JsonlStore
 from rca_engine.storage.neo4j import Neo4jGraphStore
 from rca_engine.storage.postgres import PostgresStore
+from rca_engine.storage.query import paginate_desc, paginate_page, sort_desc
+from rca_engine.timeutils import parse_iso
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,55 @@ class CompositeStorage:
         rows = self._try_postgres_read("latest_events", lambda store: store.latest_events(limit))
         return rows if rows is not None else self.jsonl.latest("evidence.jsonl", limit=limit)
 
+    def search_events(
+        self,
+        *,
+        q: str | None = None,
+        service: str | None = None,
+        env: str | None = None,
+        severity: str | None = None,
+        event_type: str | None = None,
+        trace_id: str | None = None,
+        event_time_from: str | None = None,
+        event_time_to: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        page: int | None = None,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        rows = self._try_postgres_read(
+            "search_events",
+            lambda store: store.search_events(
+                q=q,
+                service=service,
+                env=env,
+                severity=severity,
+                event_type=event_type,
+                trace_id=trace_id,
+                event_time_from=event_time_from,
+                event_time_to=event_time_to,
+                cursor=cursor,
+                limit=limit,
+                page=page,
+                page_size=page_size,
+            ),
+        )
+        if rows is not None:
+            return rows
+        items = self._filter_jsonl_events(
+            q,
+            service,
+            env,
+            severity,
+            event_type,
+            trace_id,
+            event_time_from,
+            event_time_to,
+        )
+        if page is not None:
+            return paginate_page(items, page=page, page_size=page_size)
+        return paginate_desc(items, sort_key="event_time", id_key="event_id", cursor=cursor, limit=limit)
+
     def save_candidate(self, candidate: IncidentCandidate) -> None:
         self._try_postgres("save_candidate", lambda store: store.save_candidate(candidate))
         self.jsonl.append("incident-candidates.jsonl", candidate)
@@ -54,6 +105,44 @@ class CompositeStorage:
     def latest_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._try_postgres_read("latest_candidates", lambda store: store.latest_candidates(limit))
         return rows if rows is not None else self.jsonl.latest("incident-candidates.jsonl", limit=limit)
+
+    def search_incidents(
+        self,
+        *,
+        q: str | None = None,
+        service: str | None = None,
+        env: str | None = None,
+        severity: str | None = None,
+        status: str | None = None,
+        updated_from: str | None = None,
+        updated_to: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        page: int | None = None,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        rows = self._try_postgres_read(
+            "search_incidents",
+            lambda store: store.search_incidents(
+                q=q,
+                service=service,
+                env=env,
+                severity=severity,
+                status=status,
+                updated_from=updated_from,
+                updated_to=updated_to,
+                cursor=cursor,
+                limit=limit,
+                page=page,
+                page_size=page_size,
+            ),
+        )
+        if rows is not None:
+            return rows
+        items = self._filter_jsonl_incidents(q, service, env, severity, status, updated_from, updated_to)
+        if page is not None:
+            return paginate_page(items, page=page, page_size=page_size)
+        return paginate_desc(items, sort_key="updated_at", id_key="incident_id", cursor=cursor, limit=limit)
 
     def save_rca_result(self, result: RCAResult) -> None:
         self._try_postgres("save_rca_result", lambda store: store.save_rca_result(result))
@@ -283,6 +372,83 @@ class CompositeStorage:
         scored = [item for item in scored if item.get("score", 0) > 0]
         return sorted(scored, key=lambda row: row["score"], reverse=True)[:limit]
 
+    def _filter_jsonl_events(
+        self,
+        q: str | None,
+        service: str | None,
+        env: str | None,
+        severity: str | None,
+        event_type: str | None,
+        trace_id: str | None,
+        event_time_from: str | None,
+        event_time_to: str | None,
+    ) -> list[dict[str, Any]]:
+        query = (q or "").lower()
+        rows = self.jsonl.latest("evidence.jsonl", limit=10000)
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            if service and row.get("service") != service:
+                continue
+            if env and row.get("env") != env:
+                continue
+            if severity and row.get("severity") != severity:
+                continue
+            if event_type and row.get("event_type") != event_type:
+                continue
+            if trace_id and row.get("trace_id") != trace_id:
+                continue
+            if not _within_time_range(row.get("event_time"), event_time_from, event_time_to):
+                continue
+            haystack = f"{row.get('event_id', '')} {row.get('summary', '')} {row.get('attributes', {})}".lower()
+            if query and query not in haystack:
+                continue
+            filtered.append(row)
+        return sort_desc(filtered, sort_key="event_time", id_key="event_id")
+
+    def _filter_jsonl_incidents(
+        self,
+        q: str | None,
+        service: str | None,
+        env: str | None,
+        severity: str | None,
+        status: str | None,
+        updated_from: str | None,
+        updated_to: str | None,
+    ) -> list[dict[str, Any]]:
+        query = (q or "").lower()
+        rows = self.jsonl.latest("incident-candidates.jsonl", limit=10000)
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            if service and row.get("service") != service:
+                continue
+            if env and row.get("env") != env:
+                continue
+            if severity and row.get("severity") != severity:
+                continue
+            if status and row.get("status") != status:
+                continue
+            if not _within_time_range(row.get("updated_at"), updated_from, updated_to):
+                continue
+            haystack = f"{row.get('incident_id', '')} {row.get('summary', '')}".lower()
+            if query and query not in haystack:
+                continue
+            filtered.append(row)
+        return sort_desc(filtered, sort_key="updated_at", id_key="incident_id")
+
+
+def _within_time_range(value: Any, start: str | None, end: str | None) -> bool:
+    if not start and not end:
+        return True
+    try:
+        parsed = parse_iso(str(value))
+        if start and parsed < parse_iso(start):
+            return False
+        if end and parsed > parse_iso(end):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
 
 def _runbook_payload(runbook) -> dict[str, Any]:
     return {
@@ -305,5 +471,12 @@ def _score_jsonl_document(
         lexical = len([term for term in query_terms if term in text]) / len(query_terms)
     semantic = cosine_similarity(embedding, document.get("embedding", []))
     item = dict(document)
+    item["keyword_score"] = round(lexical, 4)
+    item["semantic_score"] = round(semantic, 4)
     item["score"] = round(max(lexical, semantic), 4)
+    item["recall_sources"] = [
+        source
+        for source, score in {"keyword": lexical, "semantic": semantic}.items()
+        if score > 0
+    ]
     return item

@@ -70,6 +70,11 @@ class KnowledgeRetriever:
                         "severity": row.get("severity"),
                         "document_id": row.get("document_id"),
                     },
+                    score_breakdown={
+                        "semantic_score": float(row.get("semantic_score") or 0),
+                        "keyword_score": float(row.get("keyword_score") or 0),
+                    },
+                    recall_sources=list(row.get("recall_sources") or ["semantic"]),
                 )
             )
         return matches
@@ -96,6 +101,8 @@ class KnowledgeRetriever:
                     content=_runbook_content(runbook),
                     ref_id=runbook.get("runbook_id"),
                     attributes=runbook,
+                    score_breakdown={"keyword_score": score},
+                    recall_sources=["keyword", "runbook_catalog"],
                 )
             )
         return matches
@@ -156,6 +163,8 @@ class KnowledgeRetriever:
                 content=text[:2000],
                 ref_id=incident_id,
                 attributes={"incident_id": incident_id},
+                score_breakdown={"keyword_score": score},
+                recall_sources=["graph", "keyword"],
             )
         ]
 
@@ -170,6 +179,8 @@ def _incident_match(query: str, item: dict[str, Any], source: str) -> KnowledgeM
         content=text[:2000],
         ref_id=item.get("incident_id"),
         attributes={"incident_id": item.get("incident_id"), "service": item.get("service")},
+        score_breakdown={"keyword_score": _score(query, text), "exact_match_score": 0.12 if item.get("incident_id") else 0.0},
+        recall_sources=["exact", "keyword"],
     )
 
 
@@ -216,6 +227,19 @@ def _dedupe(matches: list[KnowledgeMatch]) -> list[KnowledgeMatch]:
     for match in matches:
         key = (match.source, match.ref_id or match.title)
         existing = deduped.get(key)
-        if not existing or match.score > existing.score:
+        if not existing:
             deduped[key] = match
+            continue
+        if match.score > existing.score:
+            primary, secondary = match, existing
+        else:
+            primary, secondary = existing, match
+        breakdown = dict(secondary.score_breakdown)
+        breakdown.update(primary.score_breakdown)
+        deduped[key] = primary.model_copy(
+            update={
+                "recall_sources": sorted(set(primary.recall_sources + secondary.recall_sources)),
+                "score_breakdown": breakdown,
+            }
+        )
     return list(deduped.values())

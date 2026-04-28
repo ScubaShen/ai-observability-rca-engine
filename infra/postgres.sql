@@ -21,6 +21,12 @@ create index if not exists idx_normalized_events_service_time
 create index if not exists idx_normalized_events_type_time
   on normalized_events (event_type, event_time desc);
 
+create index if not exists idx_normalized_events_trace_time
+  on normalized_events (trace_id, event_time desc);
+
+create index if not exists idx_normalized_events_payload
+  on normalized_events using gin (payload);
+
 create table if not exists incident_candidates (
   incident_id text primary key,
   status text not null,
@@ -38,6 +44,12 @@ create table if not exists incident_candidates (
 
 create index if not exists idx_incident_candidates_service_updated
   on incident_candidates (service, env, updated_at desc);
+
+create index if not exists idx_incident_candidates_severity_updated
+  on incident_candidates (severity, updated_at desc);
+
+create index if not exists idx_incident_candidates_payload
+  on incident_candidates using gin (payload);
 
 create table if not exists rca_results (
   incident_id text primary key references incident_candidates (incident_id) on delete cascade,
@@ -116,6 +128,12 @@ create table if not exists rag_documents (
   updated_at timestamptz not null default now()
 );
 
+alter table rag_documents
+  add column if not exists search_text tsvector
+  generated always as (
+    to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(content, ''))
+  ) stored;
+
 create index if not exists idx_rag_documents_incident
   on rag_documents (incident_id, updated_at desc);
 
@@ -124,6 +142,9 @@ create index if not exists idx_rag_documents_source
 
 create index if not exists idx_rag_documents_metadata
   on rag_documents using gin (metadata);
+
+create index if not exists idx_rag_documents_search_text
+  on rag_documents using gin (search_text);
 
 create index if not exists idx_rag_documents_embedding
   on rag_documents using ivfflat (embedding vector_cosine_ops)

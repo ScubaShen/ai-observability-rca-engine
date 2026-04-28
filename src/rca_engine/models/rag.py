@@ -15,6 +15,8 @@ class KnowledgeMatch(BaseModel):
     content: str
     ref_id: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
+    recall_sources: list[str] = Field(default_factory=list)
 
 
 class CopilotRequest(BaseModel):
@@ -45,13 +47,17 @@ class CopilotResponse(BaseModel):
     answer: str
     incident_id: str | None = None
     confidence: float
+    root_cause_summary: str | None = None
+    missing_evidence: list[str] = Field(default_factory=list)
+    recommended_manual_runbooks: list[str] = Field(default_factory=list)
+    confidence_rationale: str | None = None
     matches: list[KnowledgeMatch] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
     verification: VerificationResult | None = None
     suggested_followups: list[str] = Field(default_factory=list)
     latency_ms: int | None = None
     cache_hit: bool = False
-    response_path: Literal["fast", "deep", "fallback"] = "fallback"
+    response_path: Literal["fast", "deep", "deep_stream", "fallback"] = "fallback"
     generated_at: str = Field(default_factory=now_utc_iso)
 
 
@@ -104,6 +110,15 @@ class RAGQueryTrace(BaseModel):
     cache_hit: bool = False
     response_path: str = "fallback"
     verification: VerificationResult | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    reasoning_effort: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    recall_source_counts: dict[str, int] = Field(default_factory=dict)
+    rerank_strategy: str = "deterministic"
+    top_score_breakdown: dict[str, float] = Field(default_factory=dict)
+    fallback_reason: str | None = None
     created_at: str = Field(default_factory=now_utc_iso)
 
 

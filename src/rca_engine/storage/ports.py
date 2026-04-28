@@ -19,11 +19,44 @@ class EvidenceRepository(Protocol):
 
     def latest_events(self, limit: int = 50) -> list[dict]: ...
 
+    def search_events(
+        self,
+        *,
+        q: str | None = None,
+        service: str | None = None,
+        env: str | None = None,
+        severity: str | None = None,
+        event_type: str | None = None,
+        trace_id: str | None = None,
+        event_time_from: str | None = None,
+        event_time_to: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        page: int | None = None,
+        page_size: int = 50,
+    ) -> dict: ...
+
 
 class IncidentRepository(Protocol):
     def save_candidate(self, candidate: IncidentCandidate) -> None: ...
 
     def latest_candidates(self, limit: int = 50) -> list[dict]: ...
+
+    def search_incidents(
+        self,
+        *,
+        q: str | None = None,
+        service: str | None = None,
+        env: str | None = None,
+        severity: str | None = None,
+        status: str | None = None,
+        updated_from: str | None = None,
+        updated_to: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        page: int | None = None,
+        page_size: int = 50,
+    ) -> dict: ...
 
 
 class RCAResultRepository(Protocol):

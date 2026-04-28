@@ -19,7 +19,14 @@ class IncidentContextLoader:
         self.store = store
 
     def load(self, candidate: IncidentCandidate, limit: int = 1000) -> IncidentContext:
-        if hasattr(self.store, "latest_events"):
+        if hasattr(self.store, "search_events"):
+            rows = self.store.search_events(
+                service=candidate.service,
+                env=candidate.env,
+                cursor=None,
+                limit=limit,
+            ).get("items", [])
+        elif hasattr(self.store, "latest_events"):
             rows = self.store.latest_events(limit=limit)
         else:
             rows = self.store.latest("evidence.jsonl", limit=limit)

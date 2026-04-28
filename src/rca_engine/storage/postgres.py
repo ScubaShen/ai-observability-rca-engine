@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from rca_engine.models import (
     RCAAgentReport,
     RCAResult,
 )
+from rca_engine.storage.query import decode_cursor, encode_cursor
 
 try:
     import psycopg
@@ -86,6 +88,94 @@ class PostgresStore:
     def latest_events(self, limit: int = 50) -> list[dict[str, Any]]:
         return self._query_payloads("normalized_events", "received_at", limit)
 
+    def search_events(
+        self,
+        *,
+        q: str | None = None,
+        service: str | None = None,
+        env: str | None = None,
+        severity: str | None = None,
+        event_type: str | None = None,
+        trace_id: str | None = None,
+        event_time_from: str | None = None,
+        event_time_to: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        page: int | None = None,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        filters = []
+        if q:
+            params["q"] = f"%{q}%"
+            filters.append("(payload->>'summary' ilike %(q)s or payload::text ilike %(q)s)")
+        for name, value in {
+            "service": service,
+            "env": env,
+            "severity": severity,
+            "event_type": event_type,
+            "trace_id": trace_id,
+        }.items():
+            if value:
+                params[name] = value
+                filters.append(f"{name} = %({name})s")
+        if event_time_from:
+            params["event_time_from"] = event_time_from
+            filters.append("event_time >= %(event_time_from)s::timestamptz")
+        if event_time_to:
+            params["event_time_to"] = event_time_to
+            filters.append("event_time <= %(event_time_to)s::timestamptz")
+        decoded_cursor = decode_cursor(cursor)
+        if decoded_cursor:
+            params["cursor_time"], params["cursor_id"] = decoded_cursor
+            filters.append(
+                "(event_time < %(cursor_time)s::timestamptz "
+                "or (event_time = %(cursor_time)s::timestamptz and event_id > %(cursor_id)s))"
+            )
+        where = f"where {' and '.join(filters)}" if filters else ""
+        if page is not None:
+            page = max(page, 1)
+            page_size = max(page_size, 1)
+            params["limit"] = page_size
+            params["offset"] = (page - 1) * page_size
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"select count(*) as total from normalized_events {where}", params)
+                    total = int(cur.fetchone()["total"])
+                    cur.execute(
+                        f"""
+                        select payload, event_time, event_id
+                        from normalized_events
+                        {where}
+                        order by event_time desc, event_id asc
+                        limit %(limit)s offset %(offset)s
+                        """,
+                        params,
+                    )
+                    rows = cur.fetchall()
+            return _page_response([dict(row["payload"]) for row in rows], page, page_size, total)
+
+        params["limit"] = limit + 1
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    select payload, event_time, event_id
+                    from normalized_events
+                    {where}
+                    order by event_time desc, event_id asc
+                    limit %(limit)s
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+        items = [dict(row["payload"]) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit and items:
+            last_row = rows[limit - 1]
+            next_cursor = encode_cursor(str(last_row["event_time"]), str(last_row["event_id"]))
+        return {"items": items, "limit": limit, "next_cursor": next_cursor}
+
     def save_candidate(self, candidate: IncidentCandidate) -> None:
         self._execute(
             """
@@ -121,6 +211,101 @@ class PostgresStore:
 
     def latest_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         return self._query_payloads("incident_candidates", "updated_at", limit)
+
+    def search_incidents(
+        self,
+        *,
+        q: str | None = None,
+        service: str | None = None,
+        env: str | None = None,
+        severity: str | None = None,
+        status: str | None = None,
+        updated_from: str | None = None,
+        updated_to: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        page: int | None = None,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        filters = []
+        if q:
+            params["q"] = f"%{q}%"
+            filters.append("(incident_id ilike %(q)s or summary ilike %(q)s)")
+        for name, value in {
+            "service": service,
+            "env": env,
+            "severity": severity,
+            "status": status,
+        }.items():
+            if value:
+                params[name] = value
+                filters.append(f"{name} = %({name})s")
+        if updated_from:
+            params["updated_from"] = updated_from
+            filters.append("updated_at >= %(updated_from)s::timestamptz")
+        if updated_to:
+            params["updated_to"] = updated_to
+            filters.append("updated_at <= %(updated_to)s::timestamptz")
+        decoded_cursor = decode_cursor(cursor)
+        if decoded_cursor:
+            params["cursor_time"], params["cursor_id"] = decoded_cursor
+            filters.append(
+                "(updated_at < %(cursor_time)s::timestamptz "
+                "or (updated_at = %(cursor_time)s::timestamptz and incident_id > %(cursor_id)s))"
+            )
+        where = f"where {' and '.join(filters)}" if filters else ""
+        if page is not None:
+            page = max(page, 1)
+            page_size = max(page_size, 1)
+            params["limit"] = page_size
+            params["offset"] = (page - 1) * page_size
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"select count(*) as total from incident_candidates {where}", params)
+                    total = int(cur.fetchone()["total"])
+                    cur.execute(
+                        f"""
+                        select payload, updated_at, incident_id,
+                               exists(select 1 from rca_results where rca_results.incident_id = incident_candidates.incident_id) as has_rca
+                        from incident_candidates
+                        {where}
+                        order by updated_at desc, incident_id asc
+                        limit %(limit)s offset %(offset)s
+                        """,
+                        params,
+                    )
+                    rows = cur.fetchall()
+            items = [dict(row["payload"]) for row in rows]
+            for item, row in zip(items, rows, strict=False):
+                item["has_rca"] = bool(row["has_rca"])
+                item["_updated_at"] = str(row["updated_at"])
+            return _page_response(items, page, page_size, total)
+
+        params["limit"] = limit + 1
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    select payload, updated_at, incident_id,
+                           exists(select 1 from rca_results where rca_results.incident_id = incident_candidates.incident_id) as has_rca
+                    from incident_candidates
+                    {where}
+                    order by updated_at desc, incident_id asc
+                    limit %(limit)s
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+        items = [dict(row["payload"]) for row in rows[:limit]]
+        for item, row in zip(items, rows[:limit], strict=False):
+            item["has_rca"] = bool(row["has_rca"])
+            item["_updated_at"] = str(row["updated_at"])
+        next_cursor = None
+        if len(rows) > limit and items:
+            last_row = rows[limit - 1]
+            next_cursor = encode_cursor(str(last_row["updated_at"]), str(last_row["incident_id"]))
+        return {"items": items, "limit": limit, "next_cursor": next_cursor}
 
     def save_rca_result(self, result: RCAResult) -> None:
         self._execute(
@@ -290,24 +475,34 @@ class PostgresStore:
         pattern = f"%{query}%"
         params = {
             "query": pattern,
+            "plain_query": query,
             "embedding": _vector_literal(embedding),
-            "incident_id": incident_id,
             "limit": limit,
         }
-        incident_filter = "and (%(incident_id)s is null or incident_id = %(incident_id)s)"
+        incident_filter = ""
+        if incident_id:
+            params["incident_id"] = incident_id
+            incident_filter = "and incident_id = %(incident_id)s"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     select payload,
-                           greatest(
-                             case when title ilike %(query)s or content ilike %(query)s then 0.72 else 0 end,
-                             1 - (embedding <=> %(embedding)s::vector)
-                           ) as score
+                           ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)) as keyword_score,
+                           1 - (embedding <=> %(embedding)s::vector) as semantic_score
                     from rag_documents
                     where embedding is not null
+                    and (
+                      search_text @@ plainto_tsquery('simple', %(plain_query)s)
+                      or title ilike %(query)s
+                      or content ilike %(query)s
+                      or embedding is not null
+                    )
                     {incident_filter}
-                    order by score desc, updated_at desc
+                    order by greatest(
+                      ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)),
+                      1 - (embedding <=> %(embedding)s::vector)
+                    ) desc, updated_at desc
                     limit %(limit)s
                     """,
                     params,
@@ -316,7 +511,16 @@ class PostgresStore:
         results: list[dict[str, Any]] = []
         for row in rows:
             payload = row["payload"]
-            payload["score"] = float(row["score"] or 0)
+            keyword_score = float(row["keyword_score"] or 0)
+            semantic_score = float(row["semantic_score"] or 0)
+            payload["keyword_score"] = keyword_score
+            payload["semantic_score"] = semantic_score
+            payload["score"] = max(keyword_score, semantic_score)
+            payload["recall_sources"] = [
+                source
+                for source, score in {"keyword": keyword_score, "semantic": semantic_score}.items()
+                if score > 0
+            ] or ["semantic"]
             results.append(payload)
         results.extend(self._search_historical_incidents(query, embedding, limit))
         results = sorted(results, key=lambda item: item.get("score", 0), reverse=True)
@@ -353,6 +557,7 @@ class PostgresStore:
         results: list[dict[str, Any]] = []
         for row in rows:
             payload = row["payload"]
+            score = float(row["score"] or 0)
             results.append(
                 {
                     "document_id": f"historical:{row['historical_incident_id']}",
@@ -364,7 +569,10 @@ class PostgresStore:
                     "severity": payload.get("severity"),
                     "title": row["summary"],
                     "content": row["root_cause"] or row["summary"],
-                    "score": float(row["score"] or 0),
+                    "score": score,
+                    "semantic_score": score,
+                    "keyword_score": 0.0,
+                    "recall_sources": ["historical_incident", "semantic"],
                     "metadata": payload,
                 }
             )
@@ -481,6 +689,19 @@ class PostgresStore:
 def _payload(item: BaseModel) -> Any:
     data = item.model_dump(mode="json")
     return Jsonb(data) if Jsonb is not None else data
+
+
+def _page_response(items: list[dict[str, Any]], page: int, page_size: int, total: int) -> dict[str, Any]:
+    total_pages = math.ceil(total / page_size) if total else 0
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_prev": total_pages > 0 and page > 1,
+    }
 
 
 def _vector_literal(values: list[float]) -> str:
