@@ -1,0 +1,72 @@
+[
+  {
+    "event_id": "event_log_1",
+    "event_type": "log.error_pattern",
+    "source_topic": "observability.logs",
+    "event_time": "2026-05-01T10:01:00+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "error",
+    "trace_id": "trace-checkout-1",
+    "span_id": "span-log-1",
+    "correlation_keys": ["trace:trace-checkout-1"],
+    "summary": "Checkout failed with java.lang.IllegalStateException while creating order.",
+    "attributes": {
+      "error_pattern": "java_exception",
+      "message": "java.lang.IllegalStateException: checkout order creation failed"
+    }
+  },
+  {
+    "event_id": "event_trace_1",
+    "event_type": "trace.error",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T10:01:05+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "error",
+    "trace_id": "trace-checkout-1",
+    "span_id": "span-trace-1",
+    "correlation_keys": ["trace:trace-checkout-1"],
+    "summary": "Trace error detected on checkout POST /orders request.",
+    "attributes": {
+      "span_name": "POST /orders",
+      "status_code": "ERROR"
+    }
+  },
+  {
+    "event_id": "event_trace_2",
+    "event_type": "trace.slow_span",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T10:02:00+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "warning",
+    "trace_id": "trace-checkout-2",
+    "span_id": "span-trace-2",
+    "correlation_keys": ["trace:trace-checkout-2"],
+    "summary": "Checkout request waited 2400ms on redis dependency.",
+    "attributes": {
+      "span_name": "GET redis cart lock",
+      "duration_ms": 2400,
+      "peer.service": "redis"
+    }
+  },
+  {
+    "event_id": "event_payment_1",
+    "event_type": "trace.slow_span",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T10:03:00+00:00",
+    "service": "payment",
+    "env": "prod",
+    "severity": "warning",
+    "trace_id": "trace-payment-1",
+    "span_id": "span-payment-1",
+    "correlation_keys": ["trace:trace-payment-1"],
+    "summary": "Payment timeout while calling payment-api dependency.",
+    "attributes": {
+      "span_name": "POST payment-api charge",
+      "duration_ms": 3100,
+      "peer.service": "payment-api"
+    }
+  }
+]

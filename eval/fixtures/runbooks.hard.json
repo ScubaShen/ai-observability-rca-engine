@@ -1,0 +1,68 @@
+[
+  {
+    "runbook_id": "rb-application-exception",
+    "title": "Application exception investigation",
+    "categories": ["application"],
+    "keywords": ["checkout", "exception", "trace.error", "log.error_pattern"],
+    "steps": [
+      "Inspect matching error logs in Loki.",
+      "Open the related trace in Tempo.",
+      "Compare with recent deploy or config changes."
+    ]
+  },
+  {
+    "runbook_id": "rb-dependency-latency",
+    "title": "Dependency latency investigation",
+    "categories": ["dependency"],
+    "keywords": ["checkout", "latency", "dependency", "redis", "downstream"],
+    "steps": [
+      "Check downstream dependency health.",
+      "Inspect slow spans in Tempo.",
+      "Compare dependency latency with request error rate."
+    ]
+  },
+  {
+    "runbook_id": "rb-cache-saturation",
+    "title": "Cache saturation and lock contention",
+    "categories": ["dependency", "resource_or_load"],
+    "keywords": ["cart", "checkout", "cache", "redis", "lock", "contention", "saturation", "queue"],
+    "steps": [
+      "Check Redis command latency and hot key distribution.",
+      "Inspect lock wait spans and cache pool saturation.",
+      "Compare cache queue depth with checkout and cart error rate."
+    ]
+  },
+  {
+    "runbook_id": "rb-database-pool-exhaustion",
+    "title": "Database connection pool exhaustion",
+    "categories": ["resource_or_load", "dependency"],
+    "keywords": ["database", "postgres", "pool", "connections", "saturation", "inventory", "cart"],
+    "steps": [
+      "Check database connection pool utilization.",
+      "Inspect slow SQL spans and queue wait time.",
+      "Compare pool exhaustion with service thread saturation."
+    ]
+  },
+  {
+    "runbook_id": "rb-payment-gateway-timeout",
+    "title": "Payment gateway timeout investigation",
+    "categories": ["dependency"],
+    "keywords": ["payment", "gateway", "authorization", "processor", "timeout", "payment-api"],
+    "steps": [
+      "Check payment gateway health and timeout rate.",
+      "Inspect downstream authorization traces.",
+      "Compare gateway latency with payment retry volume."
+    ]
+  },
+  {
+    "runbook_id": "rb-deploy-config-change",
+    "title": "Deploy and configuration change correlation",
+    "categories": ["change", "application"],
+    "keywords": ["deploy", "config", "release", "feature flag", "rollback", "change"],
+    "steps": [
+      "Find deploy and configuration changes in the incident window.",
+      "Compare the first bad signal with release timestamps.",
+      "Prepare a manual rollback or feature flag disablement plan."
+    ]
+  }
+]

@@ -1,0 +1,263 @@
+[
+  {
+    "event_id": "event_checkout_hard_deploy",
+    "event_type": "deploy.change",
+    "source_topic": "deployments",
+    "event_time": "2026-05-01T11:00:10+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "info",
+    "trace_id": "trace-checkout-hard-1",
+    "correlation_keys": ["service:checkout", "trace:trace-checkout-hard-1", "change:checkout-release-842"],
+    "summary": "Checkout release 842 enabled a new cart lock retry path.",
+    "attributes": {
+      "release": "checkout-842",
+      "feature_flag": "cart_lock_retry_v2",
+      "change_type": "deploy"
+    }
+  },
+  {
+    "event_id": "event_checkout_hard_config",
+    "event_type": "config.change",
+    "source_topic": "config",
+    "event_time": "2026-05-01T11:00:20+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "info",
+    "trace_id": "trace-checkout-hard-1",
+    "correlation_keys": ["service:checkout", "trace:trace-checkout-hard-1", "change:checkout-release-842"],
+    "summary": "Checkout cart lock retry timeout changed from 400ms to 2500ms.",
+    "attributes": {
+      "config_key": "cart.lock.retry.timeout.ms",
+      "old_value": 400,
+      "new_value": 2500
+    }
+  },
+  {
+    "event_id": "event_checkout_hard_log",
+    "event_type": "log.error_pattern",
+    "source_topic": "observability.logs",
+    "event_time": "2026-05-01T11:01:00+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "error",
+    "trace_id": "trace-checkout-hard-1",
+    "span_id": "span-checkout-log",
+    "correlation_keys": ["service:checkout", "trace:trace-checkout-hard-1"],
+    "summary": "Checkout failed after cart lock wait with IllegalStateException in order creation.",
+    "attributes": {
+      "error_pattern": "java_exception",
+      "message": "java.lang.IllegalStateException: cart lock wait exceeded during checkout"
+    }
+  },
+  {
+    "event_id": "event_checkout_hard_trace_error",
+    "event_type": "trace.error",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T11:01:08+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "error",
+    "trace_id": "trace-checkout-hard-1",
+    "span_id": "span-checkout-error",
+    "correlation_keys": ["service:checkout", "trace:trace-checkout-hard-1"],
+    "summary": "Checkout POST /orders returned 500 after cart lock retry loop.",
+    "attributes": {
+      "span_name": "POST /orders",
+      "status_code": "ERROR"
+    }
+  },
+  {
+    "event_id": "event_checkout_hard_redis",
+    "event_type": "trace.slow_span",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T11:01:16+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "warning",
+    "trace_id": "trace-checkout-hard-1",
+    "span_id": "span-checkout-redis",
+    "correlation_keys": ["service:checkout", "trace:trace-checkout-hard-1"],
+    "summary": "Checkout waited 2700ms on redis cart lock before failing the order.",
+    "attributes": {
+      "span_name": "GET redis cart lock",
+      "duration_ms": 2700,
+      "peer.service": "redis"
+    }
+  },
+  {
+    "event_id": "event_checkout_hard_metric",
+    "event_type": "metric.anomaly",
+    "source_topic": "metric.anomaly",
+    "event_time": "2026-05-01T11:01:24+00:00",
+    "service": "checkout",
+    "env": "prod",
+    "severity": "warning",
+    "trace_id": "trace-checkout-hard-1",
+    "correlation_keys": ["service:checkout", "trace:trace-checkout-hard-1"],
+    "summary": "Metric anomaly detected for checkout: cart_lock_wait_queue_depth=93.",
+    "attributes": {
+      "metric_name": "cart_lock_wait_queue_depth",
+      "value": 93,
+      "baseline_mean": 12,
+      "baseline_stddev": 5,
+      "threshold": 27
+    }
+  },
+  {
+    "event_id": "event_cart_hard_trace_db",
+    "event_type": "trace.slow_span",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T11:06:00+00:00",
+    "service": "cart",
+    "env": "prod",
+    "severity": "warning",
+    "trace_id": "trace-cart-hard-1",
+    "span_id": "span-cart-db",
+    "correlation_keys": ["service:cart", "trace:trace-cart-hard-1"],
+    "summary": "Cart update waited 3200ms for postgres connection checkout.",
+    "attributes": {
+      "span_name": "SELECT cart_items FOR UPDATE",
+      "duration_ms": 3200,
+      "db.system": "postgres"
+    }
+  },
+  {
+    "event_id": "event_cart_hard_metric",
+    "event_type": "metric.anomaly",
+    "source_topic": "metric.anomaly",
+    "event_time": "2026-05-01T11:06:12+00:00",
+    "service": "cart",
+    "env": "prod",
+    "severity": "critical",
+    "trace_id": "trace-cart-hard-1",
+    "correlation_keys": ["service:cart", "trace:trace-cart-hard-1"],
+    "summary": "Metric anomaly detected for cart: db_connection_pool_in_use=100.",
+    "attributes": {
+      "metric_name": "db_connection_pool_in_use",
+      "value": 100,
+      "baseline_mean": 48,
+      "baseline_stddev": 8,
+      "threshold": 72
+    }
+  },
+  {
+    "event_id": "event_cart_hard_config",
+    "event_type": "config.change",
+    "source_topic": "config",
+    "event_time": "2026-05-01T11:06:18+00:00",
+    "service": "cart",
+    "env": "prod",
+    "severity": "info",
+    "trace_id": "trace-cart-hard-1",
+    "correlation_keys": ["service:cart", "trace:trace-cart-hard-1"],
+    "summary": "Cart database pool max connections reduced from 80 to 30.",
+    "attributes": {
+      "config_key": "db.pool.max",
+      "old_value": 80,
+      "new_value": 30
+    }
+  },
+  {
+    "event_id": "event_payment_hard_config",
+    "event_type": "config.change",
+    "source_topic": "config",
+    "event_time": "2026-05-01T11:10:30+00:00",
+    "service": "payment",
+    "env": "prod",
+    "severity": "info",
+    "trace_id": "trace-payment-hard-1",
+    "correlation_keys": ["service:payment", "trace:trace-payment-hard-1"],
+    "summary": "Payment gateway timeout lowered from 1500ms to 700ms for authorization calls.",
+    "attributes": {
+      "config_key": "gateway.authorization.timeout.ms",
+      "old_value": 1500,
+      "new_value": 700
+    }
+  },
+  {
+    "event_id": "event_payment_hard_gateway",
+    "event_type": "trace.slow_span",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T11:11:00+00:00",
+    "service": "payment",
+    "env": "prod",
+    "severity": "warning",
+    "trace_id": "trace-payment-hard-1",
+    "span_id": "span-payment-gateway",
+    "correlation_keys": ["service:payment", "trace:trace-payment-hard-1"],
+    "summary": "Payment authorization waited 2600ms on payment-api gateway.",
+    "attributes": {
+      "span_name": "POST payment-api authorize",
+      "duration_ms": 2600,
+      "peer.service": "payment-api"
+    }
+  },
+  {
+    "event_id": "event_payment_hard_trace_error",
+    "event_type": "trace.error",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T11:11:09+00:00",
+    "service": "payment",
+    "env": "prod",
+    "severity": "error",
+    "trace_id": "trace-payment-hard-1",
+    "span_id": "span-payment-error",
+    "correlation_keys": ["service:payment", "trace:trace-payment-hard-1"],
+    "summary": "Payment charge failed after authorization gateway timeout.",
+    "attributes": {
+      "span_name": "POST /charge",
+      "status_code": "ERROR"
+    }
+  },
+  {
+    "event_id": "event_inventory_hard_deploy",
+    "event_type": "deploy.change",
+    "source_topic": "deployments",
+    "event_time": "2026-05-01T11:15:15+00:00",
+    "service": "inventory",
+    "env": "prod",
+    "severity": "info",
+    "trace_id": "trace-inventory-hard-1",
+    "correlation_keys": ["service:inventory", "trace:trace-inventory-hard-1"],
+    "summary": "Inventory release 119 changed stock reservation batching.",
+    "attributes": {
+      "release": "inventory-119",
+      "change_type": "deploy"
+    }
+  },
+  {
+    "event_id": "event_inventory_hard_log",
+    "event_type": "log.error_pattern",
+    "source_topic": "observability.logs",
+    "event_time": "2026-05-01T11:16:00+00:00",
+    "service": "inventory",
+    "env": "prod",
+    "severity": "error",
+    "trace_id": "trace-inventory-hard-1",
+    "span_id": "span-inventory-log",
+    "correlation_keys": ["service:inventory", "trace:trace-inventory-hard-1"],
+    "summary": "Inventory reservation failed with optimistic lock exception.",
+    "attributes": {
+      "error_pattern": "optimistic_lock_exception",
+      "message": "OptimisticLockException while reserving inventory"
+    }
+  },
+  {
+    "event_id": "event_inventory_hard_trace_error",
+    "event_type": "trace.error",
+    "source_topic": "observability.traces",
+    "event_time": "2026-05-01T11:16:07+00:00",
+    "service": "inventory",
+    "env": "prod",
+    "severity": "error",
+    "trace_id": "trace-inventory-hard-1",
+    "span_id": "span-inventory-error",
+    "correlation_keys": ["service:inventory", "trace:trace-inventory-hard-1"],
+    "summary": "Inventory reservation API returned conflict after stock batching change.",
+    "attributes": {
+      "span_name": "POST /inventory/reservations",
+      "status_code": "ERROR"
+    }
+  }
+]
