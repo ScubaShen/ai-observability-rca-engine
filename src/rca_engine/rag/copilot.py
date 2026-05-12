@@ -10,11 +10,12 @@ from rca_engine.models import (
     PostmortemDraft,
     RAGQueryTrace,
 )
+from rca_engine.rag.context import ContextBuilder
 from rca_engine.rag.embedding import HashEmbeddingProvider
 from rca_engine.rag.llm import LLMProvider, LLMResult, LLMSettings, build_llm_provider
 from rca_engine.rag.llm_reranker import LLMReranker
 from rca_engine.rag.retriever import KnowledgeRetriever
-from rca_engine.rag.verification import citations_from_matches, verify_answer
+from rca_engine.rag.verification import verify_answer
 
 
 class RCACopilot:
@@ -31,6 +32,7 @@ class RCACopilot:
         self.llm_settings = llm_settings or LLMSettings()
         self.llm = llm_provider or build_llm_provider(self.llm_settings)
         self.llm_reranker = LLMReranker(self.llm, enabled=self.llm_settings.rerank_enabled)
+        self.context_builder = ContextBuilder()
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cache: dict[str, tuple[float, CopilotResponse]] = {}
 
@@ -43,7 +45,7 @@ class RCACopilot:
             self._record_trace(request, "cache", cached_response, 0)
             return cached_response
 
-        intent, matches = self.retriever.search_with_intent(
+        intent, matches, pipeline_trace = self.retriever.search_with_pipeline(
             query=request.question,
             incident_id=request.incident_id,
             limit=request.limit,
@@ -55,6 +57,10 @@ class RCACopilot:
             if [item.ref_id for item in reranked] != [item.ref_id for item in matches]:
                 rerank_strategy = "llm"
                 matches = reranked
+        pipeline_trace["optional_reranker"] = {
+            "strategy": rerank_strategy,
+            "enabled": response_path == "deep" and self.llm_settings.rerank_enabled,
+        }
 
         llm_result: LLMResult | None = None
         fallback_reason: str | None = None
@@ -71,7 +77,9 @@ class RCACopilot:
             answer = _compose_answer(request.question, matches)
             fallback_reason = fallback_reason or "llm_unavailable_or_empty"
 
-        citations = citations_from_matches(matches)
+        built_context = self.context_builder.build(matches)
+        citations = built_context.citations
+        pipeline_trace["context_builder"] = built_context.trace
         verification = verify_answer(answer, matches, citations)
         if verification.blocked_terms:
             response_path = "fallback"
@@ -79,6 +87,13 @@ class RCACopilot:
             answer += "\n\nAutomatic execution is out of scope. Use manual investigation and runbook steps only."
             verification = verify_answer(answer, matches, citations)
             fallback_reason = "forbidden_automation_language"
+        pipeline_trace["answer_generator"] = {"response_path": response_path}
+        pipeline_trace["verifier"] = {
+            "status": verification.status,
+            "citation_coverage": verification.citation_coverage,
+            "hallucination_risk": verification.hallucination_risk,
+            "blocked_terms": verification.blocked_terms,
+        }
 
         structured = llm_result.structured if llm_result else {}
         latency_ms = int((time.monotonic() - started) * 1000)
@@ -108,6 +123,7 @@ class RCACopilot:
             llm_result=llm_result,
             rerank_strategy=rerank_strategy,
             fallback_reason=fallback_reason,
+            pipeline_trace=pipeline_trace,
         )
         return response
 
@@ -121,7 +137,7 @@ class RCACopilot:
             return
 
         started = time.monotonic()
-        intent, matches = self.retriever.search_with_intent(
+        intent, matches, pipeline_trace = self.retriever.search_with_pipeline(
             query=request.question,
             incident_id=request.incident_id,
             limit=request.limit,
@@ -131,7 +147,13 @@ class RCACopilot:
         if [item.ref_id for item in reranked] != [item.ref_id for item in matches]:
             rerank_strategy = "llm"
             matches = reranked
-        citations = citations_from_matches(matches)
+        pipeline_trace["optional_reranker"] = {
+            "strategy": rerank_strategy,
+            "enabled": self.llm_settings.rerank_enabled,
+        }
+        built_context = self.context_builder.build(matches)
+        citations = built_context.citations
+        pipeline_trace["context_builder"] = built_context.trace
         metadata = {
             "question": request.question,
             "incident_id": request.incident_id,
@@ -166,6 +188,15 @@ class RCACopilot:
             fallback_reason = "forbidden_automation_language"
             yield "event: answer\n"
             yield f"data: \n\n{answer}\n\n"
+        pipeline_trace["answer_generator"] = {
+            "response_path": "deep_stream" if not fallback_reason else "fallback"
+        }
+        pipeline_trace["verifier"] = {
+            "status": verification.status,
+            "citation_coverage": verification.citation_coverage,
+            "hallucination_risk": verification.hallucination_risk,
+            "blocked_terms": verification.blocked_terms,
+        }
         latency_ms = int((time.monotonic() - started) * 1000)
         response = CopilotResponse(
             question=request.question,
@@ -193,6 +224,7 @@ class RCACopilot:
             ),
             rerank_strategy=rerank_strategy,
             fallback_reason=fallback_reason,
+            pipeline_trace=pipeline_trace,
         )
         yield "event: final\n"
         yield f"data: {response.model_dump_json(exclude={'answer'})}\n\n"
@@ -212,7 +244,7 @@ class RCACopilot:
         matches = self.retriever.search(
             "postmortem root cause evidence runbook", incident_id=incident_id, limit=6
         )
-        citations = citations_from_matches(matches)
+        citations = self.context_builder.build(matches).citations
         return PostmortemDraft(
             incident_id=incident_id,
             title=f"{result.get('service', 'unknown')} incident postmortem draft",
@@ -242,6 +274,7 @@ class RCACopilot:
         llm_result: LLMResult | None = None,
         rerank_strategy: str = "deterministic",
         fallback_reason: str | None = None,
+        pipeline_trace: dict | None = None,
     ) -> None:
         if not hasattr(self.store, "save_rag_query_trace"):
             return
@@ -276,6 +309,7 @@ class RCACopilot:
             recall_source_counts=_recall_source_counts(response.matches),
             rerank_strategy=rerank_strategy,
             top_score_breakdown=response.matches[0].score_breakdown if response.matches else {},
+            pipeline_trace=pipeline_trace or {},
             fallback_reason=fallback_reason,
         )
         self.store.save_rag_query_trace(trace)

@@ -1,0 +1,49 @@
+[
+  {
+    "incident_id": "incident_checkout_001",
+    "service": "checkout",
+    "env": "dev",
+    "severity": "error",
+    "summary": "checkout incident analyzed: Application error or exception path",
+    "confidence": 0.86,
+    "evidence_strength": "strong",
+    "root_causes": [
+      {
+        "hypothesis_id": "hyp_checkout_application",
+        "title": "Application error or exception path",
+        "description": "Log and trace signals indicate an application-level exception.",
+        "category": "application",
+        "confidence": 0.86,
+        "evidence_score": 0.88,
+        "supporting_event_ids": ["event_log_1", "event_trace_1"]
+      }
+    ],
+    "timeline": [
+      {"event_id": "event_log_1", "event_time": "2026-04-25T00:01:00+00:00", "summary": "Application exception detected."},
+      {"event_id": "event_trace_1", "event_time": "2026-04-25T00:01:05+00:00", "summary": "Trace error detected."}
+    ]
+  },
+  {
+    "incident_id": "incident_checkout_002",
+    "service": "checkout",
+    "env": "dev",
+    "severity": "error",
+    "summary": "checkout incident analyzed: Suspect dependency issue: redis",
+    "confidence": 0.74,
+    "evidence_strength": "medium",
+    "root_causes": [
+      {
+        "hypothesis_id": "hyp_checkout_dependency",
+        "title": "Suspect dependency issue: redis",
+        "description": "Trace evidence points to slow redis spans from checkout.",
+        "category": "dependency",
+        "confidence": 0.74,
+        "evidence_score": 0.62,
+        "supporting_event_ids": ["event_trace_2"]
+      }
+    ],
+    "timeline": [
+      {"event_id": "event_trace_2", "event_time": "2026-04-25T00:03:00+00:00", "summary": "Slow redis dependency span."}
+    ]
+  }
+]

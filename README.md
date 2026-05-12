@@ -143,6 +143,7 @@ src/rca_engine/
   storage/       JSONL / PostgreSQL / Neo4j 儲存抽象
   routers/       FastAPI router 分層
   rag/           hybrid retrieval、rerank、verification、LLM provider
+  evaluation/    offline eval runner、metrics、fixtures-backed baseline
   agents/        operator-facing report 與 runbook recommendation
   console/       Streamlit RCA Console
   models/        共享資料模型
@@ -187,6 +188,7 @@ curl -sS -X POST http://localhost:18000/copilot/chat \
 - [docs/architecture.md](docs/architecture.md)：系統架構與設計取捨
 - [docs/rca-design.md](docs/rca-design.md)：RCA pipeline、evidence scoring、causal reasoning
 - [docs/rag.md](docs/rag.md)：Hybrid RAG、rerank、LLM、verification
+- [docs/evaluation.md](docs/evaluation.md)：offline deterministic eval、Docker 操作、指標縮寫與 baseline 驗收標準
 - [docs/operator-console.md](docs/operator-console.md)：值班排查入口與 Console 工作流
 - [docs/runbook.md](docs/runbook.md)：啟動、驗證、排查與 reindex
 - [docs/security.md](docs/security.md)：Secret、LLM 邊界與自動化限制

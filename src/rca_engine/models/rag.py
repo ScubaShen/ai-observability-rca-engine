@@ -118,6 +118,7 @@ class RAGQueryTrace(BaseModel):
     recall_source_counts: dict[str, int] = Field(default_factory=dict)
     rerank_strategy: str = "deterministic"
     top_score_breakdown: dict[str, float] = Field(default_factory=dict)
+    pipeline_trace: dict[str, Any] = Field(default_factory=dict)
     fallback_reason: str | None = None
     created_at: str = Field(default_factory=now_utc_iso)
 

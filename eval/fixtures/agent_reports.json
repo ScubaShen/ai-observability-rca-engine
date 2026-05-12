@@ -1,0 +1,14 @@
+[
+  {
+    "incident_id": "incident_checkout_001",
+    "summary": "Agent analysis found matching checkout exception logs and trace errors.",
+    "agent_findings": [{"finding_type": "log_error_pattern"}, {"finding_type": "trace_error"}],
+    "follow_up_questions": ["Which deploy changed before the exception started?"]
+  },
+  {
+    "incident_id": "incident_checkout_002",
+    "summary": "Agent analysis found checkout slow spans around redis dependency calls.",
+    "agent_findings": [{"finding_type": "slow_dependency_span"}],
+    "follow_up_questions": ["Did redis latency increase before checkout errors?"]
+  }
+]

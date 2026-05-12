@@ -4,8 +4,10 @@ import re
 from typing import Any
 
 from rca_engine.models import KnowledgeMatch
+from rca_engine.rag.candidates import CandidateProcessor
 from rca_engine.rag.embedding import HashEmbeddingProvider
-from rca_engine.rag.query import QueryIntent, understand_query
+from rca_engine.rag.preprocessor import ProcessedQuery, QueryPreprocessor
+from rca_engine.rag.query import QueryIntent
 from rca_engine.rag.ranker import rerank
 
 
@@ -13,6 +15,8 @@ class KnowledgeRetriever:
     def __init__(self, store, embedding_provider: HashEmbeddingProvider | None = None) -> None:
         self.store = store
         self.embedding_provider = embedding_provider or HashEmbeddingProvider()
+        self.preprocessor = QueryPreprocessor()
+        self.candidate_processor = CandidateProcessor()
 
     def search(
         self,
@@ -20,19 +24,31 @@ class KnowledgeRetriever:
         incident_id: str | None = None,
         limit: int = 5,
     ) -> list[KnowledgeMatch]:
-        intent = understand_query(query)
-        candidates: list[KnowledgeMatch] = []
-        candidates.extend(self._rag_document_matches(query, incident_id, limit=max(limit * 4, 20)))
-        candidates.extend(self._runbook_matches(query))
-        if incident_id:
-            candidates.extend(self._incident_matches(query, incident_id))
-            candidates.extend(self._event_matches(query, incident_id))
-            candidates.extend(self._graph_matches(query, incident_id))
-        else:
-            candidates.extend(self._latest_incident_matches(query))
+        _, matches, _ = self.search_with_pipeline(query, incident_id=incident_id, limit=limit)
+        return matches
 
-        ranked = rerank(_dedupe(candidates), intent)
-        return ranked[:limit]
+    def search_with_pipeline(
+        self,
+        query: str,
+        incident_id: str | None = None,
+        limit: int = 5,
+    ) -> tuple[QueryIntent, list[KnowledgeMatch], dict[str, Any]]:
+        processed = self.preprocessor.process(query)
+        candidates: list[KnowledgeMatch] = []
+        retrieval_query = processed.rewritten_query
+        candidates.extend(self._rag_document_matches(retrieval_query, incident_id, limit=max(limit * 4, 20)))
+        candidates.extend(self._runbook_matches(retrieval_query))
+        if incident_id:
+            candidates.extend(self._incident_matches(retrieval_query, incident_id))
+            candidates.extend(self._event_matches(retrieval_query, incident_id))
+            candidates.extend(self._graph_matches(retrieval_query, incident_id))
+        else:
+            candidates.extend(self._latest_incident_matches(retrieval_query))
+
+        processed_candidates = self.candidate_processor.process(candidates)
+        ranked = rerank(processed_candidates.matches, processed.intent)
+        pipeline_trace = _pipeline_trace(processed, processed_candidates.trace, ranked, limit)
+        return processed.intent, ranked[:limit], pipeline_trace
 
     def search_with_intent(
         self,
@@ -40,8 +56,8 @@ class KnowledgeRetriever:
         incident_id: str | None = None,
         limit: int = 5,
     ) -> tuple[QueryIntent, list[KnowledgeMatch]]:
-        intent = understand_query(query)
-        return intent, self.search(query, incident_id=incident_id, limit=limit)
+        intent, matches, _ = self.search_with_pipeline(query, incident_id=incident_id, limit=limit)
+        return intent, matches
 
     def _rag_document_matches(
         self,
@@ -222,24 +238,20 @@ def _flatten(value: Any) -> str:
     return str(value)
 
 
-def _dedupe(matches: list[KnowledgeMatch]) -> list[KnowledgeMatch]:
-    deduped: dict[tuple[str, str | None], KnowledgeMatch] = {}
-    for match in matches:
-        key = (match.source, match.ref_id or match.title)
-        existing = deduped.get(key)
-        if not existing:
-            deduped[key] = match
-            continue
-        if match.score > existing.score:
-            primary, secondary = match, existing
-        else:
-            primary, secondary = existing, match
-        breakdown = dict(secondary.score_breakdown)
-        breakdown.update(primary.score_breakdown)
-        deduped[key] = primary.model_copy(
-            update={
-                "recall_sources": sorted(set(primary.recall_sources + secondary.recall_sources)),
-                "score_breakdown": breakdown,
-            }
-        )
-    return list(deduped.values())
+def _pipeline_trace(
+    processed: ProcessedQuery,
+    candidate_trace: dict[str, Any],
+    ranked: list[KnowledgeMatch],
+    limit: int,
+) -> dict[str, Any]:
+    return {
+        "preprocess": processed.trace(),
+        "candidate_processing": candidate_trace,
+        "ranker": {
+            "strategy": "weighted_deterministic",
+            "input_count": len(ranked),
+            "output_limit": limit,
+            "top_sources": [match.source for match in ranked[:limit]],
+            "top_score_breakdown": ranked[0].score_breakdown if ranked else {},
+        },
+    }

@@ -1,0 +1,29 @@
+[
+  {
+    "event_id": "event_log_1",
+    "event_type": "log.error_pattern",
+    "service": "checkout",
+    "env": "dev",
+    "severity": "error",
+    "summary": "Application exception detected in checkout logs.",
+    "trace_id": "trace_checkout_1"
+  },
+  {
+    "event_id": "event_trace_1",
+    "event_type": "trace.error",
+    "service": "checkout",
+    "env": "dev",
+    "severity": "error",
+    "summary": "Trace error detected on checkout request path.",
+    "trace_id": "trace_checkout_1"
+  },
+  {
+    "event_id": "event_trace_2",
+    "event_type": "trace.slow_span",
+    "service": "checkout",
+    "env": "dev",
+    "severity": "error",
+    "summary": "Slow redis dependency span from checkout.",
+    "trace_id": "trace_checkout_2"
+  }
+]

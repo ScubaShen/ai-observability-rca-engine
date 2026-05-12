@@ -143,6 +143,7 @@ src/rca_engine/
   storage/       JSONL / PostgreSQL / Neo4j storage abstraction
   routers/       FastAPI router modules
   rag/           Hybrid retrieval, rerank, verification, LLM provider
+  evaluation/    Offline eval runner, metrics, fixtures-backed baseline
   agents/        Operator-facing reports and runbook recommendation
   console/       Streamlit RCA Console
   models/        Shared data models
@@ -187,6 +188,7 @@ Open the Streamlit RCA Console: http://localhost:8501
 - [docs/architecture.md](docs/architecture.md): system architecture and design tradeoffs
 - [docs/rca-design.md](docs/rca-design.md): RCA pipeline, evidence scoring, and causal reasoning
 - [docs/rag.md](docs/rag.md): Hybrid RAG, rerank, LLM, and verification
+- [docs/evaluation.md](docs/evaluation.md): offline deterministic eval, Docker usage, metric glossary, and baseline acceptance criteria
 - [docs/operator-console.md](docs/operator-console.md): on-call investigation entry point and Console workflow
 - [docs/runbook.md](docs/runbook.md): startup, verification, troubleshooting, and reindex
 - [docs/security.md](docs/security.md): secret handling, LLM boundary, and automation restrictions

@@ -1,0 +1,16 @@
+[
+  {
+    "runbook_id": "rb-application-exception",
+    "title": "Application exception investigation",
+    "categories": ["application"],
+    "keywords": ["checkout", "exception", "trace.error", "log.error_pattern"],
+    "steps": ["Inspect matching error logs in Loki.", "Open the related trace in Tempo.", "Compare with recent deploy or config changes."]
+  },
+  {
+    "runbook_id": "rb-dependency-latency",
+    "title": "Dependency latency investigation",
+    "categories": ["dependency"],
+    "keywords": ["checkout", "latency", "dependency", "redis", "downstream"],
+    "steps": ["Check downstream dependency health.", "Inspect slow spans in Tempo.", "Compare dependency latency with request error rate."]
+  }
+]
