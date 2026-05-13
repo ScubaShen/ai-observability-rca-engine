@@ -77,7 +77,7 @@ class RCACopilot:
             answer = _compose_answer(request.question, matches)
             fallback_reason = fallback_reason or "llm_unavailable_or_empty"
 
-        built_context = self.context_builder.build(matches)
+        built_context = self.context_builder.build(matches, query=request.question)
         citations = built_context.citations
         pipeline_trace["context_builder"] = built_context.trace
         verification = verify_answer(answer, matches, citations)
@@ -151,7 +151,7 @@ class RCACopilot:
             "strategy": rerank_strategy,
             "enabled": self.llm_settings.rerank_enabled,
         }
-        built_context = self.context_builder.build(matches)
+        built_context = self.context_builder.build(matches, query=request.question)
         citations = built_context.citations
         pipeline_trace["context_builder"] = built_context.trace
         metadata = {
@@ -244,7 +244,10 @@ class RCACopilot:
         matches = self.retriever.search(
             "postmortem root cause evidence runbook", incident_id=incident_id, limit=6
         )
-        citations = self.context_builder.build(matches).citations
+        citations = self.context_builder.build(
+            matches,
+            query="postmortem root cause evidence runbook",
+        ).citations
         return PostmortemDraft(
             incident_id=incident_id,
             title=f"{result.get('service', 'unknown')} incident postmortem draft",

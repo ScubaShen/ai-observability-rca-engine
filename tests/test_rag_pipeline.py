@@ -1,7 +1,11 @@
 from rca_engine.models import KnowledgeMatch
 from rca_engine.rag.candidates import CandidateProcessor
 from rca_engine.rag.context import ContextBuilder
+from rca_engine.rag.planner import RetrievalPlanner
 from rca_engine.rag.preprocessor import DriftChecker, QueryPreprocessor
+from rca_engine.rag.query import QueryIntent
+from rca_engine.rag.ranker import RRFFusionRanker
+from rca_engine.rag.retriever import KnowledgeRetriever
 
 
 def test_query_preprocessor_extracts_entities_and_bounded_rewrite_preserves_them():
@@ -71,3 +75,138 @@ def test_context_builder_selects_citation_snippets_and_evidence_coverage():
     assert built.citations[0].evidence_ids == ["event_1"]
     assert built.citations[0].quote == "Checkout application exception with detailed trace evidence."
     assert built.trace["evidence_coverage"] == 1.0
+
+
+def test_rrf_fusion_prefers_multi_channel_consensus_over_single_raw_score():
+    shared = KnowledgeMatch(
+        source="rca_result",
+        title="Shared RCA",
+        score=0.2,
+        content="shared",
+        ref_id="incident_shared",
+        attributes={"incident_id": "incident_shared"},
+        recall_sources=["keyword"],
+    )
+    single = KnowledgeMatch(
+        source="rca_result",
+        title="Single high score RCA",
+        score=0.99,
+        content="single",
+        ref_id="incident_single",
+        attributes={"incident_id": "incident_single"},
+        recall_sources=["keyword"],
+    )
+    plan = _plan("root_cause")
+
+    ranked = RRFFusionRanker().rerank(
+        {
+            "keyword": [single, shared],
+            "semantic": [shared],
+        },
+        plan,
+    )
+
+    assert ranked[0].ref_id == "incident_shared"
+    assert ranked[0].score_breakdown["rrf_score"] == 1.0
+    assert ranked[0].attributes["retrieval_channel_ranks"] == {"keyword": 2, "semantic": 1}
+
+
+def test_rrf_domain_boost_prefers_matching_service_when_retrieval_is_close():
+    mismatch = KnowledgeMatch(
+        source="rca_result",
+        title="Payment RCA",
+        score=0.9,
+        content="payment",
+        ref_id="incident_payment",
+        attributes={"service": "payment", "incident_id": "incident_payment"},
+        recall_sources=["semantic"],
+    )
+    match = KnowledgeMatch(
+        source="rca_result",
+        title="Checkout RCA",
+        score=0.8,
+        content="checkout",
+        ref_id="incident_checkout",
+        attributes={"service": "checkout", "incident_id": "incident_checkout"},
+        recall_sources=["semantic"],
+    )
+    plan = _plan("root_cause", entities={"service": "checkout"})
+
+    ranked = RRFFusionRanker().rerank({"semantic": [mismatch, match]}, plan)
+
+    assert ranked[0].ref_id == "incident_checkout"
+    assert ranked[0].score_breakdown["service_env_score"] == 0.12
+
+
+def test_retrieval_planner_adds_aliases_and_domain_expansions_for_noisy_queries():
+    processed = QueryPreprocessor().process(
+        "Billing says cartsrv hangs after basket lock waiting during rollout"
+    )
+
+    plan = RetrievalPlanner().build(processed, incident_id=None, limit=5)
+
+    assert plan.entities["service"] == "cart"
+    assert plan.aliases["cartsrv"] == "cart"
+    assert plan.aliases["basket"] == "cart"
+    assert "cart" in plan.keyword_query
+    assert "cache saturation" in plan.semantic_query
+    assert "config change" in plan.semantic_query
+
+
+def test_retriever_ranks_specific_runbooks_before_generic_exception_guide():
+    class RunbookStore:
+        def list_runbooks(self):
+            return [
+                {
+                    "runbook_id": "rb-application-exception",
+                    "title": "Application exception investigation",
+                    "categories": ["application"],
+                    "keywords": ["exception"],
+                    "steps": ["Inspect stack traces."],
+                },
+                {
+                    "runbook_id": "rb-cache-saturation",
+                    "title": "Cache saturation and lock contention",
+                    "categories": ["dependency"],
+                    "keywords": ["cache", "locking", "waiting", "redis"],
+                    "steps": ["Inspect queue depth and lock wait."],
+                },
+                {
+                    "runbook_id": "rb-deploy-config-change",
+                    "title": "Deploy and config change investigation",
+                    "categories": ["change"],
+                    "keywords": ["release", "rollout", "config"],
+                    "steps": ["Compare rollout and config timing."],
+                },
+            ]
+
+        def search_rag_documents(self, query, embedding, incident_id=None, limit=10):
+            return []
+
+        def latest_rca_results(self, limit=10):
+            return []
+
+        def latest_agent_reports(self, limit=10):
+            return []
+
+    matches = KnowledgeRetriever(RunbookStore()).search(
+        "exceptions slow waiting release timing cache locking downstream calls",
+        limit=5,
+    )
+
+    runbook_ids = [match.ref_id for match in matches if match.source == "runbook"]
+    assert runbook_ids[:2] == ["rb-cache-saturation", "rb-deploy-config-change"]
+    assert "rb-application-exception" not in runbook_ids[:2]
+
+
+def _plan(intent: str, entities: dict[str, str] | None = None):
+    query_intent = QueryIntent(intent=intent)
+    return type(
+        "Plan",
+        (),
+        {
+            "intent": query_intent,
+            "entities": entities or {},
+            "incident_id": None,
+        },
+    )()

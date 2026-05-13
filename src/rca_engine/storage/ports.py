@@ -94,6 +94,15 @@ class RAGRepository(Protocol):
         limit: int = 10,
     ) -> list[dict]: ...
 
+    def search_rag_documents_by_channel(
+        self,
+        query: str,
+        embedding: list[float],
+        incident_id: str | None = None,
+        limit: int = 10,
+        channel: str = "semantic",
+    ) -> list[dict]: ...
+
     def save_rag_query_trace(self, trace: RAGQueryTrace) -> None: ...
 
     def latest_rag_query_traces(self, limit: int = 50) -> list[dict]: ...

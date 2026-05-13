@@ -472,6 +472,40 @@ class PostgresStore:
         incident_id: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
+        keyword_rows = self.search_rag_documents_by_channel(
+            query,
+            embedding,
+            incident_id=incident_id,
+            limit=limit,
+            channel="keyword",
+        )
+        semantic_rows = self.search_rag_documents_by_channel(
+            query,
+            embedding,
+            incident_id=incident_id,
+            limit=limit,
+            channel="semantic",
+        )
+        historical_rows = self.search_rag_documents_by_channel(
+            query,
+            embedding,
+            incident_id=None,
+            limit=limit,
+            channel="historical",
+        )
+        results = _merge_search_rows([*keyword_rows, *semantic_rows, *historical_rows])
+        return sorted(results, key=lambda item: item.get("score", 0), reverse=True)[:limit]
+
+    def search_rag_documents_by_channel(
+        self,
+        query: str,
+        embedding: list[float],
+        incident_id: str | None = None,
+        limit: int = 10,
+        channel: str = "semantic",
+    ) -> list[dict[str, Any]]:
+        if channel == "historical":
+            return self._search_historical_incidents(query, embedding, limit)
         pattern = f"%{query}%"
         params = {
             "query": pattern,
@@ -483,30 +517,37 @@ class PostgresStore:
         if incident_id:
             params["incident_id"] = incident_id
             incident_filter = "and incident_id = %(incident_id)s"
+        if channel == "keyword":
+            sql = f"""
+                select payload,
+                       ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)) as keyword_score,
+                       0.0 as semantic_score
+                from rag_documents
+                where (
+                  search_text @@ plainto_tsquery('simple', %(plain_query)s)
+                  or title ilike %(query)s
+                  or content ilike %(query)s
+                )
+                {incident_filter}
+                order by ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)) desc,
+                         updated_at desc
+                limit %(limit)s
+                """
+        else:
+            sql = f"""
+                select payload,
+                       0.0 as keyword_score,
+                       1 - (embedding <=> %(embedding)s::vector) as semantic_score
+                from rag_documents
+                where embedding is not null
+                {incident_filter}
+                order by 1 - (embedding <=> %(embedding)s::vector) desc,
+                         updated_at desc
+                limit %(limit)s
+                """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    select payload,
-                           ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)) as keyword_score,
-                           1 - (embedding <=> %(embedding)s::vector) as semantic_score
-                    from rag_documents
-                    where embedding is not null
-                    and (
-                      search_text @@ plainto_tsquery('simple', %(plain_query)s)
-                      or title ilike %(query)s
-                      or content ilike %(query)s
-                      or embedding is not null
-                    )
-                    {incident_filter}
-                    order by greatest(
-                      ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)),
-                      1 - (embedding <=> %(embedding)s::vector)
-                    ) desc, updated_at desc
-                    limit %(limit)s
-                    """,
-                    params,
-                )
+                cur.execute(sql, params)
                 rows = cur.fetchall()
         results: list[dict[str, Any]] = []
         for row in rows:
@@ -522,9 +563,7 @@ class PostgresStore:
                 if score > 0
             ] or ["semantic"]
             results.append(payload)
-        results.extend(self._search_historical_incidents(query, embedding, limit))
-        results = sorted(results, key=lambda item: item.get("score", 0), reverse=True)
-        return results[:limit]
+        return results
 
     def _search_historical_incidents(
         self,
@@ -706,6 +745,35 @@ def _page_response(items: list[dict[str, Any]], page: int, page_size: int, total
 
 def _vector_literal(values: list[float]) -> str:
     return "[" + ",".join(f"{value:.6f}" for value in values) + "]"
+
+
+def _merge_search_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            str(row.get("source_type") or "rag_document"),
+            str(row.get("ref_id") or row.get("document_id") or row.get("title")),
+        )
+        existing = merged.get(key)
+        if not existing:
+            merged[key] = dict(row)
+            continue
+        existing["keyword_score"] = max(
+            float(existing.get("keyword_score") or 0),
+            float(row.get("keyword_score") or 0),
+        )
+        existing["semantic_score"] = max(
+            float(existing.get("semantic_score") or 0),
+            float(row.get("semantic_score") or 0),
+        )
+        existing["score"] = max(
+            float(existing.get("score") or 0),
+            float(row.get("score") or 0),
+        )
+        existing["recall_sources"] = sorted(
+            set(existing.get("recall_sources") or []).union(row.get("recall_sources") or [])
+        )
+    return list(merged.values())
 
 
 def _runbook_payload(runbook) -> dict[str, Any]:

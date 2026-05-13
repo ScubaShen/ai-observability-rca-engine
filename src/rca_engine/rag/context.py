@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,9 +15,14 @@ class BuiltContext:
 
 
 class ContextBuilder:
-    def build(self, matches: list[KnowledgeMatch], limit: int = 5) -> BuiltContext:
+    def build(
+        self,
+        matches: list[KnowledgeMatch],
+        limit: int = 5,
+        query: str | None = None,
+    ) -> BuiltContext:
         selected = _select_diverse_sources(matches, limit)
-        citations = [_citation_from_match(match) for match in selected]
+        citations = [_citation_from_match(match, query=query) for match in selected]
         evidence_coverage = _evidence_coverage(selected, citations)
         trace = {
             "selected_count": len(selected),
@@ -45,8 +51,12 @@ def _select_diverse_sources(matches: list[KnowledgeMatch], limit: int) -> list[K
     return selected
 
 
-def _citation_from_match(match: KnowledgeMatch) -> Citation:
-    evidence_ids = match.attributes.get("evidence_event_ids") or match.attributes.get("event_ids") or []
+def _citation_from_match(match: KnowledgeMatch, query: str | None = None) -> Citation:
+    evidence_ids = (
+        match.attributes.get("evidence_event_ids")
+        or match.attributes.get("event_ids")
+        or []
+    )
     if isinstance(evidence_ids, str):
         evidence_ids = [evidence_ids]
     return Citation(
@@ -54,12 +64,20 @@ def _citation_from_match(match: KnowledgeMatch) -> Citation:
         ref_id=match.ref_id,
         title=match.title,
         evidence_ids=list(evidence_ids)[:10],
-        quote=_snippet(match.content),
+        quote=_snippet(match.content, query=query),
     )
 
 
-def _snippet(content: str, limit: int = 240) -> str:
+def _snippet(content: str, limit: int = 240, query: str | None = None) -> str:
     compact = " ".join(content.split())
+    if query:
+        tokens = [token for token in _tokens(query) if len(token) > 2]
+        lowered = compact.lower()
+        positions = [lowered.find(token) for token in tokens if lowered.find(token) >= 0]
+        if positions:
+            start = max(min(positions) - 80, 0)
+            end = min(start + limit, len(compact))
+            return compact[start:end]
     return compact[:limit]
 
 
@@ -74,3 +92,7 @@ def _evidence_coverage(matches: list[KnowledgeMatch], citations: list[Citation])
         return 1.0 if citations else 0.0
     cited_ids = {item for citation in citations for item in citation.evidence_ids}
     return round(len(expected_ids.intersection(cited_ids)) / len(expected_ids), 4)
+
+
+def _tokens(value: str) -> list[str]:
+    return [token for token in re.split(r"[^a-zA-Z0-9_.-]+", value.lower()) if token]

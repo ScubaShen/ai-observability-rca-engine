@@ -219,6 +219,28 @@ class CompositeStorage:
             return rows
         return self._jsonl_rag_search(query, embedding, incident_id, limit)
 
+    def search_rag_documents_by_channel(
+        self,
+        query: str,
+        embedding: list[float],
+        incident_id: str | None = None,
+        limit: int = 10,
+        channel: str = "semantic",
+    ) -> list[dict[str, Any]]:
+        rows = self._try_postgres_read(
+            "search_rag_documents_by_channel",
+            lambda store: store.search_rag_documents_by_channel(
+                query,
+                embedding,
+                incident_id,
+                limit,
+                channel,
+            ),
+        )
+        if rows is not None:
+            return rows
+        return self._jsonl_rag_search(query, embedding, incident_id, limit, channel=channel)
+
     def save_rag_query_trace(self, trace: RAGQueryTrace) -> None:
         self._try_postgres("save_rag_query_trace", lambda store: store.save_rag_query_trace(trace))
         self.jsonl.append("rag-query-traces.jsonl", trace)
@@ -347,14 +369,18 @@ class CompositeStorage:
         embedding: list[float],
         incident_id: str | None,
         limit: int,
+        channel: str | None = None,
     ) -> list[dict[str, Any]]:
         query_terms = {term.lower() for term in query.split() if len(term) > 1}
         scored: list[dict[str, Any]] = []
-        for document in self.jsonl.latest("rag-documents.jsonl", limit=5000):
-            if incident_id and document.get("incident_id") != incident_id:
-                continue
-            scored.extend([_score_jsonl_document(document, query_terms, embedding)])
-        if not incident_id:
+        if channel != "historical":
+            for document in self.jsonl.latest("rag-documents.jsonl", limit=5000):
+                if incident_id and document.get("incident_id") != incident_id:
+                    continue
+                scored.extend(
+                    [_score_jsonl_document(document, query_terms, embedding, channel=channel)]
+                )
+        if not incident_id and channel in {None, "historical", "semantic"}:
             for incident in self.jsonl.latest("historical-incidents.jsonl", limit=5000):
                 document = {
                     "document_id": f"historical:{incident.get('historical_incident_id')}",
@@ -368,9 +394,12 @@ class CompositeStorage:
                     "embedding": incident.get("embedding", []),
                     "metadata": incident,
                 }
-                scored.extend([_score_jsonl_document(document, query_terms, embedding)])
+                scored.extend(
+                    [_score_jsonl_document(document, query_terms, embedding, channel=channel)]
+                )
         scored = [item for item in scored if item.get("score", 0) > 0]
         return sorted(scored, key=lambda row: row["score"], reverse=True)[:limit]
+
 
     def _filter_jsonl_events(
         self,
@@ -464,12 +493,17 @@ def _score_jsonl_document(
     document: dict[str, Any],
     query_terms: set[str],
     embedding: list[float],
+    channel: str | None = None,
 ) -> dict[str, Any]:
     text = f"{document.get('title', '')} {document.get('content', '')}".lower()
     lexical = 0.0
     if query_terms:
         lexical = len([term for term in query_terms if term in text]) / len(query_terms)
     semantic = cosine_similarity(embedding, document.get("embedding", []))
+    if channel == "keyword":
+        semantic = 0.0
+    elif channel in {"semantic", "historical"}:
+        lexical = 0.0
     item = dict(document)
     item["keyword_score"] = round(lexical, 4)
     item["semantic_score"] = round(semantic, 4)

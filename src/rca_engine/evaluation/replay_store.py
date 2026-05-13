@@ -113,53 +113,97 @@ class ReplayStore:
         incident_id: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
+        keyword_rows = self.search_rag_documents_by_channel(
+            query,
+            embedding,
+            incident_id=incident_id,
+            limit=limit,
+            channel="keyword",
+        )
+        semantic_rows = self.search_rag_documents_by_channel(
+            query,
+            embedding,
+            incident_id=incident_id,
+            limit=limit,
+            channel="semantic",
+        )
+        historical_rows = self.search_rag_documents_by_channel(
+            query,
+            embedding,
+            incident_id=None,
+            limit=limit,
+            channel="historical",
+        )
+        return _merge_search_rows([*keyword_rows, *semantic_rows, *historical_rows])[:limit]
+
+    def search_rag_documents_by_channel(
+        self,
+        query: str,
+        embedding: list[float],
+        incident_id: str | None = None,
+        limit: int = 10,
+        channel: str = "semantic",
+    ) -> list[dict[str, Any]]:
         del embedding
         rows: list[dict[str, Any]] = []
-        for document in self.rag_documents.values():
-            if incident_id and document.get("incident_id") not in {incident_id, None}:
-                continue
-            keyword_score = _score(query, _document_text(document))
-            semantic_score = keyword_score
-            if keyword_score <= 0 and incident_id and document.get("incident_id") == incident_id:
-                semantic_score = 0.2
-            score = max(keyword_score, semantic_score)
-            if score <= 0:
-                continue
-            row = dict(document)
-            row["keyword_score"] = keyword_score
-            row["semantic_score"] = semantic_score
-            row["score"] = score
-            row["recall_sources"] = [
-                source
-                for source, value in {"keyword": keyword_score, "semantic": semantic_score}.items()
-                if value > 0
-            ] or ["semantic"]
-            rows.append(row)
-        for incident in self.historical_incidents.values():
-            score = _score(query, _flatten(incident))
-            if score <= 0:
-                continue
-            rows.append(
-                {
-                    "document_id": incident.get("historical_incident_id"),
-                    "source_type": "historical_incident",
-                    "ref_id": incident.get("historical_incident_id"),
-                    "incident_id": incident.get("source_incident_id"),
-                    "service": incident.get("service"),
-                    "env": incident.get("env"),
-                    "severity": incident.get("severity"),
-                    "title": incident.get("summary"),
-                    "content": incident.get("root_cause") or incident.get("summary"),
-                    "metadata": {
-                        **(incident.get("metadata") or {}),
-                        "event_ids": incident.get("evidence_event_ids") or [],
-                    },
-                    "keyword_score": score,
-                    "semantic_score": score,
-                    "score": score,
-                    "recall_sources": ["historical_incident", "keyword"],
-                }
-            )
+        if channel != "historical":
+            for document in self.rag_documents.values():
+                if incident_id and document.get("incident_id") not in {incident_id, None}:
+                    continue
+                keyword_score = (
+                    _score(query, _document_text(document)) if channel == "keyword" else 0.0
+                )
+                semantic_score = (
+                    _score(query, _document_text(document)) if channel != "keyword" else 0.0
+                )
+                if (
+                    semantic_score <= 0
+                    and incident_id
+                    and document.get("incident_id") == incident_id
+                ):
+                    semantic_score = 0.2
+                score = max(keyword_score, semantic_score)
+                if score <= 0:
+                    continue
+                row = dict(document)
+                row["keyword_score"] = keyword_score
+                row["semantic_score"] = semantic_score
+                row["score"] = score
+                row["recall_sources"] = [
+                    source
+                    for source, value in {
+                        "keyword": keyword_score,
+                        "semantic": semantic_score,
+                    }.items()
+                    if value > 0
+                ] or [channel]
+                rows.append(row)
+        if channel in {"historical", "semantic"}:
+            for incident in self.historical_incidents.values():
+                score = _score(query, _flatten(incident))
+                if score <= 0:
+                    continue
+                rows.append(
+                    {
+                        "document_id": incident.get("historical_incident_id"),
+                        "source_type": "historical_incident",
+                        "ref_id": incident.get("historical_incident_id"),
+                        "incident_id": incident.get("source_incident_id"),
+                        "service": incident.get("service"),
+                        "env": incident.get("env"),
+                        "severity": incident.get("severity"),
+                        "title": incident.get("summary"),
+                        "content": incident.get("root_cause") or incident.get("summary"),
+                        "metadata": {
+                            **(incident.get("metadata") or {}),
+                            "event_ids": incident.get("evidence_event_ids") or [],
+                        },
+                        "keyword_score": 0.0,
+                        "semantic_score": score,
+                        "score": score,
+                        "recall_sources": ["historical_incident", "semantic"],
+                    }
+                )
         return sorted(rows, key=lambda item: item.get("score", 0), reverse=True)[:limit]
 
     def save_rag_query_trace(self, trace: RAGQueryTrace) -> None:
@@ -203,7 +247,12 @@ def _document_text(document: dict[str, Any]) -> str:
             str(document.get("content", "")),
             str(document.get("source_type", "")),
             " ".join(str(value) for value in metadata.values() if not isinstance(value, list)),
-            " ".join(str(item) for value in metadata.values() if isinstance(value, list) for item in value),
+            " ".join(
+                str(item)
+                for value in metadata.values()
+                if isinstance(value, list)
+                for item in value
+            ),
         ]
     )
 
@@ -231,3 +280,32 @@ def _flatten(value: Any) -> str:
     if isinstance(value, list):
         return " ".join(_flatten(item) for item in value)
     return str(value)
+
+
+def _merge_search_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            str(row.get("source_type") or "rag_document"),
+            str(row.get("ref_id") or row.get("document_id") or row.get("title")),
+        )
+        existing = merged.get(key)
+        if not existing:
+            merged[key] = dict(row)
+            continue
+        existing["keyword_score"] = max(
+            float(existing.get("keyword_score") or 0),
+            float(row.get("keyword_score") or 0),
+        )
+        existing["semantic_score"] = max(
+            float(existing.get("semantic_score") or 0),
+            float(row.get("semantic_score") or 0),
+        )
+        existing["score"] = max(
+            float(existing.get("score") or 0),
+            float(row.get("score") or 0),
+        )
+        existing["recall_sources"] = sorted(
+            set(existing.get("recall_sources") or []).union(row.get("recall_sources") or [])
+        )
+    return sorted(merged.values(), key=lambda item: item.get("score", 0), reverse=True)
