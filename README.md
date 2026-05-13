@@ -164,13 +164,6 @@ curl -sS http://localhost:18000/health
 curl -sS http://localhost:18000/storage/health
 ```
 
-查詢事件與 incident：
-
-```bash
-curl -sS 'http://localhost:18000/events/search?service=checkout&limit=50'
-curl -sS 'http://localhost:18000/incidents/search?service=checkout&limit=50'
-```
-
 Copilot：
 
 ```bash

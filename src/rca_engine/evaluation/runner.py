@@ -84,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
     compare_parser.add_argument("--baseline", type=Path, required=True)
     compare_parser.add_argument("--candidate", type=Path, required=True)
     compare_parser.add_argument("--output", type=Path)
+    compare_parser.add_argument(
+        "--focus-slice",
+        action="append",
+        dest="focus_slices",
+        help="Override the default Advanced RAG focus slices. Can be passed multiple times.",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "replay":
@@ -97,7 +103,12 @@ def main(argv: list[str] | None = None) -> int:
         print(report.model_dump_json(indent=2))
         return 0
     if args.command == "compare":
-        report = compare_reports(args.baseline, args.candidate, args.output)
+        report = compare_reports(
+            args.baseline,
+            args.candidate,
+            args.output,
+            focus_slices=args.focus_slices,
+        )
         print(report.model_dump_json(indent=2))
         return 0
     parser.error(f"Unsupported command: {args.command}")

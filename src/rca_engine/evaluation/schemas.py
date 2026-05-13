@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 Verdict = Literal["improved", "neutral", "regressed", "needs_review"]
+AcceptanceVerdict = Literal["passed", "needs_review", "failed"]
 
 
 class EvaluationCase(BaseModel):
@@ -122,10 +123,21 @@ class CaseComparison(BaseModel):
     candidate: dict[str, Any] = Field(default_factory=dict)
 
 
+class AcceptanceReport(BaseModel):
+    profile: str = "advanced_rag"
+    verdict: AcceptanceVerdict = "needs_review"
+    focus_slices: list[str] = Field(default_factory=list)
+    improvements: list[str] = Field(default_factory=list)
+    regressions: list[str] = Field(default_factory=list)
+    guardrails: list[str] = Field(default_factory=list)
+    missing_slices: list[str] = Field(default_factory=list)
+
+
 class ComparisonReport(BaseModel):
     verdict: Verdict
     overall_delta: dict[str, MetricDelta] = Field(default_factory=dict)
     slice_delta: dict[str, dict[str, MetricDelta]] = Field(default_factory=dict)
     regressions: list[CaseComparison] = Field(default_factory=list)
     improvements: list[CaseComparison] = Field(default_factory=list)
+    acceptance: AcceptanceReport = Field(default_factory=AcceptanceReport)
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from rca_engine.evaluation.metrics import metric_delta
 from rca_engine.evaluation.schemas import (
+    AcceptanceReport,
+    AcceptanceVerdict,
     CaseComparison,
     ComparisonReport,
     EvaluationReport,
@@ -20,16 +23,30 @@ from rca_engine.evaluation.schemas import (
 RAG_PRIMARY_METRICS = ("recall_at_5", "recall_at_10", "mrr", "ndcg_at_5")
 RAG_GUARDRAILS = ("citation_coverage",)
 RCA_PRIMARY_METRICS = ("root_cause_at_1", "root_cause_at_3", "category_accuracy", "evidence_support")
+DEFAULT_FOCUS_SLICES = (
+    "semantic_gap",
+    "noisy_query",
+    "runbook_discrimination",
+    "cross_incident",
+    "evidence_support",
+)
+SLICE_GATE_RAG_METRICS = ("recall_at_5", "mrr", "ndcg_at_5")
 
 
 def compare_reports(
     baseline_path: Path,
     candidate_path: Path,
     output: Path | None = None,
+    *,
+    focus_slices: Sequence[str] | None = None,
 ) -> ComparisonReport:
     baseline = EvaluationReport.model_validate(json.loads(baseline_path.read_text(encoding="utf-8")))
     candidate = EvaluationReport.model_validate(json.loads(candidate_path.read_text(encoding="utf-8")))
-    report = compare_evaluation_reports(baseline, candidate)
+    report = compare_evaluation_reports(
+        baseline,
+        candidate,
+        focus_slices=focus_slices,
+    )
     report.metadata = {
         **report.metadata,
         "baseline": str(baseline_path),
@@ -38,10 +55,16 @@ def compare_reports(
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        output.with_suffix(".md").write_text(render_comparison_markdown(report), encoding="utf-8")
     return report
 
 
-def compare_evaluation_reports(baseline: EvaluationReport, candidate: EvaluationReport) -> ComparisonReport:
+def compare_evaluation_reports(
+    baseline: EvaluationReport,
+    candidate: EvaluationReport,
+    *,
+    focus_slices: Sequence[str] | None = None,
+) -> ComparisonReport:
     overall_delta = _overall_delta(baseline, candidate)
     slice_delta = _slice_delta(baseline.slices, candidate.slices)
     regressions: list[CaseComparison] = []
@@ -51,6 +74,7 @@ def compare_evaluation_reports(baseline: EvaluationReport, candidate: Evaluation
     regressions.extend(_rca_regressions(baseline.rca_cases, candidate.rca_cases))
     improvements.extend(_rca_improvements(baseline.rca_cases, candidate.rca_cases))
 
+    acceptance = _advanced_rag_acceptance(overall_delta, slice_delta, focus_slices)
     verdict = _verdict(overall_delta, regressions, improvements)
     return ComparisonReport(
         verdict=verdict,
@@ -63,6 +87,7 @@ def compare_evaluation_reports(baseline: EvaluationReport, candidate: Evaluation
         },
         regressions=regressions,
         improvements=improvements,
+        acceptance=acceptance,
         metadata={
             "baseline_mode": baseline.mode,
             "candidate_mode": candidate.mode,
@@ -98,6 +123,182 @@ def _slice_delta(
             )
         result[slice_name] = values
     return result
+
+
+def _advanced_rag_acceptance(
+    overall_delta: dict[str, dict[str, Any]],
+    slice_delta: dict[str, dict[str, dict[str, Any]]],
+    focus_slices: Sequence[str] | None,
+) -> AcceptanceReport:
+    slices = tuple(focus_slices or DEFAULT_FOCUS_SLICES)
+    regressions: list[str] = []
+    improvements: list[str] = []
+    guardrails: list[str] = []
+    missing = [name for name in slices if name not in slice_delta]
+
+    for name in slices:
+        metrics = slice_delta.get(name)
+        if not metrics:
+            continue
+        for metric in SLICE_GATE_RAG_METRICS:
+            key = f"rag.{metric}"
+            delta = metrics.get(key)
+            if not delta:
+                continue
+            formatted = _format_delta(name, key, delta)
+            value = delta.get("delta")
+            if value is not None and value < 0:
+                regressions.append(formatted)
+            elif value is not None and value > 0:
+                improvements.append(formatted)
+
+        unsupported = metrics.get("rag.unsupported_answer_rate")
+        if unsupported and unsupported.get("delta") is not None and unsupported["delta"] > 0:
+            guardrails.append(_format_delta(name, "rag.unsupported_answer_rate", unsupported))
+
+        evidence = metrics.get("rca.evidence_support")
+        if evidence and evidence.get("delta") is not None and evidence["delta"] < 0:
+            guardrails.append(_format_delta(name, "rca.evidence_support", evidence))
+
+    for key in ("rag.citation_coverage", "rag.unsupported_answer_rate", "rca.evidence_support"):
+        delta = overall_delta.get(key)
+        if not delta or delta.get("delta") is None:
+            continue
+        value = delta["delta"]
+        if key == "rag.unsupported_answer_rate" and value > 0:
+            guardrails.append(_format_delta("overall", key, delta))
+        elif key != "rag.unsupported_answer_rate" and value < 0:
+            guardrails.append(_format_delta("overall", key, delta))
+
+    verdict = _acceptance_verdict(
+        regressions,
+        improvements,
+        guardrails,
+        missing,
+    )
+    return AcceptanceReport(
+        verdict=verdict,
+        focus_slices=list(slices),
+        improvements=improvements,
+        regressions=regressions,
+        guardrails=guardrails,
+        missing_slices=missing,
+    )
+
+
+def _acceptance_verdict(
+    regressions: list[str],
+    improvements: list[str],
+    guardrails: list[str],
+    missing_slices: list[str],
+) -> AcceptanceVerdict:
+    if regressions or any("unsupported_answer_rate" in item for item in guardrails):
+        return "failed"
+    if guardrails or missing_slices or not improvements:
+        return "needs_review"
+    return "passed"
+
+
+def _format_delta(scope: str, metric: str, delta: dict[str, Any]) -> str:
+    baseline = delta.get("baseline")
+    candidate = delta.get("candidate")
+    value = delta.get("delta")
+    return f"{scope}.{metric}: {baseline} -> {candidate} ({value:+.4f})"
+
+
+def render_comparison_markdown(report: ComparisonReport) -> str:
+    lines = [
+        "# Evaluation Compare Report",
+        "",
+        f"- Verdict: `{report.verdict}`",
+        f"- Advanced RAG acceptance: `{report.acceptance.verdict}`",
+        f"- Acceptance profile: `{report.acceptance.profile}`",
+        "",
+        "## Overall Metrics",
+        "",
+        "| Metric | Baseline | Candidate | Delta |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for key in (
+        "rag.recall_at_5",
+        "rag.recall_at_10",
+        "rag.mrr",
+        "rag.ndcg_at_5",
+        "rag.citation_coverage",
+        "rag.unsupported_answer_rate",
+        "rca.root_cause_at_1",
+        "rca.root_cause_at_3",
+        "rca.evidence_support",
+        "rca.unsupported_root_cause_rate",
+    ):
+        delta = report.overall_delta.get(key)
+        if not delta:
+            continue
+        lines.append(
+            f"| `{key}` | {_display(delta.baseline)} | {_display(delta.candidate)} | {_display_delta(delta.delta)} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Advanced RAG Acceptance",
+            "",
+            f"Focus slices: {', '.join(f'`{item}`' for item in report.acceptance.focus_slices)}",
+            "",
+        ]
+    )
+    _append_items(lines, "Improvements", report.acceptance.improvements)
+    _append_items(lines, "Regressions", report.acceptance.regressions)
+    _append_items(lines, "Guardrails", report.acceptance.guardrails)
+    _append_items(lines, "Missing Slices", report.acceptance.missing_slices)
+
+    lines.extend(["", "## Case-Level Changes", ""])
+    _append_case_summary(lines, "Regressions", report.regressions)
+    _append_case_summary(lines, "Improvements", report.improvements)
+
+    lines.extend(["", "## Metadata", ""])
+    for key, value in sorted(report.metadata.items()):
+        lines.append(f"- `{key}`: `{value}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _append_items(lines: list[str], title: str, values: list[str]) -> None:
+    lines.extend([f"### {title}", ""])
+    if not values:
+        lines.append("- None")
+    else:
+        lines.extend(f"- {item}" for item in values)
+    lines.append("")
+
+
+def _append_case_summary(lines: list[str], title: str, values: list[CaseComparison]) -> None:
+    lines.extend([f"### {title}", ""])
+    if not values:
+        lines.append("- None")
+    else:
+        for item in values[:10]:
+            incident = f", incident `{item.incident_id}`" if item.incident_id else ""
+            lines.append(f"- `{item.kind}` `{item.case_id}`{incident}: {item.reason}")
+        if len(values) > 10:
+            lines.append(f"- ... {len(values) - 10} more")
+    lines.append("")
+
+
+def _display(value: float | int | bool | None) -> str:
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    if value is None:
+        return "-"
+    return str(value)
+
+
+def _display_delta(value: float | int | None) -> str:
+    if isinstance(value, float):
+        return f"{value:+.4f}"
+    if isinstance(value, int):
+        return f"{value:+d}"
+    return "-"
 
 
 def _rag_regressions(

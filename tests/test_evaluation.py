@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from rca_engine.evaluation.comparison import compare_evaluation_reports
+from rca_engine.evaluation.comparison import compare_evaluation_reports, compare_reports
 from rca_engine.evaluation.metrics import (
     evidence_support,
     ndcg_at_k,
@@ -18,6 +18,7 @@ from rca_engine.evaluation.schemas import (
     RAGMetricBlock,
     RCAEvaluationResult,
     RCAMetricBlock,
+    SliceMetricBlock,
 )
 from rca_engine.hash_utils import stable_id
 from rca_engine.models import KnowledgeMatch, RCAResult
@@ -143,11 +144,16 @@ def test_hard_replay_eval_exposes_dev_and_holdout_slices():
     assert {"dev", "hard", "chinese_query", "noisy_query", "runbook_discrimination"}.issubset(
         dev_report.slices
     )
-    assert holdout_report.rag.query_count == 2
+    assert holdout_report.rag.query_count == 4
     assert holdout_report.rca.case_count == 1
-    assert {"holdout", "hard", "chinese_query", "evidence_support"}.issubset(
-        holdout_report.slices
-    )
+    assert {
+        "holdout",
+        "hard",
+        "chinese_query",
+        "evidence_support",
+        "noisy_query",
+        "runbook_discrimination",
+    }.issubset(holdout_report.slices)
 
 
 def test_compare_report_self_comparison_is_neutral():
@@ -217,6 +223,95 @@ def test_compare_report_detects_hard_case_improvement():
     assert comparison.verdict == "improved"
     assert comparison.improvements
     assert comparison.regressions == []
+
+
+def test_compare_acceptance_passes_when_focus_slice_improves_without_guardrail_regression():
+    baseline = _comparison_report(recall=0.5, rca_hit=1.0, evidence=1.0)
+    candidate = _comparison_report(recall=0.8, rca_hit=1.0, evidence=1.0)
+    baseline.slices["semantic_gap"] = _slice_block(recall=0.5)
+    candidate.slices["semantic_gap"] = _slice_block(recall=0.8)
+
+    comparison = compare_evaluation_reports(
+        baseline,
+        candidate,
+        focus_slices=["semantic_gap"],
+    )
+
+    assert comparison.acceptance.verdict == "passed"
+    assert comparison.acceptance.improvements
+    assert comparison.acceptance.regressions == []
+    assert comparison.acceptance.guardrails == []
+
+
+def test_compare_acceptance_fails_when_focus_slice_ranking_regresses():
+    baseline = _comparison_report(recall=0.8, rca_hit=1.0, evidence=1.0)
+    candidate = _comparison_report(recall=0.8, rca_hit=1.0, evidence=1.0)
+    baseline.slices["runbook_discrimination"] = _slice_block(recall=0.8, mrr=1.0, ndcg=1.0)
+    candidate.slices["runbook_discrimination"] = _slice_block(recall=0.8, mrr=0.5, ndcg=0.7)
+
+    comparison = compare_evaluation_reports(
+        baseline,
+        candidate,
+        focus_slices=["runbook_discrimination"],
+    )
+
+    assert comparison.acceptance.verdict == "failed"
+    assert any("rag.mrr" in item for item in comparison.acceptance.regressions)
+    assert any("rag.ndcg_at_5" in item for item in comparison.acceptance.regressions)
+
+
+def test_compare_acceptance_fails_when_unsupported_rate_increases_despite_recall_gain():
+    baseline = _comparison_report(recall=0.5, rca_hit=1.0, evidence=1.0)
+    candidate = _comparison_report(recall=0.8, rca_hit=1.0, evidence=1.0)
+    baseline.slices["noisy_query"] = _slice_block(recall=0.5, unsupported=0.0)
+    candidate.slices["noisy_query"] = _slice_block(recall=0.8, unsupported=1.0)
+
+    comparison = compare_evaluation_reports(
+        baseline,
+        candidate,
+        focus_slices=["noisy_query"],
+    )
+
+    assert comparison.acceptance.verdict == "failed"
+    assert any("unsupported_answer_rate" in item for item in comparison.acceptance.guardrails)
+
+
+def test_compare_acceptance_needs_review_when_focus_slice_is_missing():
+    report = _comparison_report(recall=1.0, rca_hit=1.0, evidence=1.0)
+
+    comparison = compare_evaluation_reports(
+        report,
+        report,
+        focus_slices=["semantic_gap"],
+    )
+
+    assert comparison.acceptance.verdict == "needs_review"
+    assert comparison.acceptance.missing_slices == ["semantic_gap"]
+
+
+def test_compare_report_writes_markdown_summary_next_to_json(tmp_path):
+    baseline = _comparison_report(recall=0.5, rca_hit=1.0, evidence=1.0)
+    candidate = _comparison_report(recall=0.8, rca_hit=1.0, evidence=1.0)
+    baseline.slices["semantic_gap"] = _slice_block(recall=0.5)
+    candidate.slices["semantic_gap"] = _slice_block(recall=0.8)
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    output_path = tmp_path / "compare.json"
+    baseline_path.write_text(baseline.model_dump_json(), encoding="utf-8")
+    candidate_path.write_text(candidate.model_dump_json(), encoding="utf-8")
+
+    report = compare_reports(
+        baseline_path,
+        candidate_path,
+        output_path,
+        focus_slices=["semantic_gap"],
+    )
+
+    markdown = output_path.with_suffix(".md")
+    assert output_path.exists()
+    assert markdown.exists()
+    assert report.acceptance.verdict == "passed"
+    assert "Advanced RAG acceptance" in markdown.read_text(encoding="utf-8")
 
 
 def test_compare_report_needs_review_when_holdout_case_regresses():
@@ -388,4 +483,34 @@ def _comparison_report(recall: float, rca_hit: float, evidence: float) -> Evalua
                 unsupported_root_cause=evidence == 0,
             )
         ],
+    )
+
+
+def _slice_block(
+    recall: float,
+    *,
+    mrr: float | None = None,
+    ndcg: float | None = None,
+    citation: float = 1.0,
+    unsupported: float = 0.0,
+    evidence: float = 1.0,
+) -> SliceMetricBlock:
+    return SliceMetricBlock(
+        rag=RAGMetricBlock(
+            query_count=1,
+            recall_at_5=recall,
+            recall_at_10=recall,
+            mrr=recall if mrr is None else mrr,
+            ndcg_at_5=recall if ndcg is None else ndcg,
+            citation_coverage=citation,
+            unsupported_answer_rate=unsupported,
+        ),
+        rca=RCAMetricBlock(
+            case_count=1,
+            root_cause_at_1=1.0,
+            root_cause_at_3=1.0,
+            category_accuracy=1.0,
+            evidence_support=evidence,
+            unsupported_root_cause_rate=0.0 if evidence else 1.0,
+        ),
     )
