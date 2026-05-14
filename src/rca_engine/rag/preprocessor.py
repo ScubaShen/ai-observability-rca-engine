@@ -11,6 +11,12 @@ ENTITY_PATTERNS = {
     "incident_id": re.compile(r"\bincident[_-][a-zA-Z0-9_.-]+\b"),
     "trace_id": re.compile(r"\btrace[_-][a-zA-Z0-9_.-]+\b"),
     "error_code": re.compile(r"\b(?:HTTP\s*)?[45][0-9]{2}\b|\b[A-Z][A-Za-z0-9_]*Exception\b"),
+    "deploy_id": re.compile(r"\b(?:deploy|release|rollout)[_-][a-zA-Z0-9_.-]+\b"),
+    "version": re.compile(r"\bv?\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9_.-]+)?\b"),
+    "endpoint": re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/[a-zA-Z0-9_./{}:-]+)\b|(/[a-zA-Z0-9_./{}:-]+)"),
+    "metric_name": re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_.]*(?:latency|duration|error|cpu|memory|gc|queue|saturation)[a-zA-Z0-9_.]*\b"),
+    "time_range": re.compile(r"\b(?:last|past)\s+\d+\s*(?:m|min|minute|h|hour|d|day)s?\b"),
+    "dependency": re.compile(r"\b(?:downstream|upstream|dependency|redis|postgres|kafka|mysql|payment|checkout|cart)\b"),
 }
 
 
@@ -48,10 +54,25 @@ class EntityExtractor:
         for name, pattern in ENTITY_PATTERNS.items():
             match = pattern.search(query)
             if match:
-                entities[name] = match.group(0).replace(" ", "")
+                value = match.group(0).strip()
+                if name not in {"endpoint", "time_range"}:
+                    value = value.replace(" ", "")
+                entities[name] = value
 
-        for name in ("incident_id", "service", "env", "trace_id", "span_id", "error_code"):
-            match = re.search(rf"\b{name}\s*[:=]\s*([a-zA-Z0-9_.-]+)", lowered)
+        for name in (
+            "incident_id",
+            "service",
+            "env",
+            "trace_id",
+            "span_id",
+            "error_code",
+            "metric_name",
+            "endpoint",
+            "dependency",
+            "deploy_id",
+            "version",
+        ):
+            match = re.search(rf"\b{name}\s*[:=]\s*([a-zA-Z0-9_./{{}}:-]+)", lowered)
             if match:
                 entities[name] = match.group(1)
         return entities
@@ -60,10 +81,23 @@ class EntityExtractor:
 class BoundedQueryRewriter:
     def rewrite(self, query: str, intent: QueryIntent, entities: dict[str, str]) -> tuple[str, bool]:
         additions: list[str] = []
-        for key in ("incident_id", "service", "env", "trace_id", "span_id", "error_code"):
+        for key in (
+            "incident_id",
+            "service",
+            "env",
+            "trace_id",
+            "span_id",
+            "error_code",
+            "metric_name",
+            "endpoint",
+            "dependency",
+            "deploy_id",
+            "version",
+            "time_range",
+        ):
             value = entities.get(key)
             if value and value.lower() not in query.lower():
-                additions.append(value)
+                additions.append(f"{key}:{value}" if key not in {"incident_id", "trace_id"} else value)
         if intent.intent != "general" and intent.intent not in query.lower():
             additions.append(intent.intent)
         if not additions:

@@ -3,12 +3,23 @@ from __future__ import annotations
 from typing import Any
 
 from rca_engine.hash_utils import stable_id
-from rca_engine.models import HistoricalIncident, RAGDocument, RCAAgentReport, RCAResult
-from rca_engine.rag.embedding import HashEmbeddingProvider, text_for_embedding
+from rca_engine.models import (
+    HistoricalIncident,
+    RAGDocument,
+    RCAAgentReport,
+    RCAResult,
+    TypedEvidenceChunk,
+)
+from rca_engine.rag.chunks import (
+    chunks_from_agent_report,
+    chunks_from_rca_result,
+    chunks_from_runbook,
+)
+from rca_engine.rag.embedding import EmbeddingProvider, HashEmbeddingProvider, text_for_embedding
 
 
 class RAGIndexer:
-    def __init__(self, store, embedding_provider: HashEmbeddingProvider | None = None) -> None:
+    def __init__(self, store, embedding_provider: EmbeddingProvider | None = None) -> None:
         self.store = store
         self.embedding_provider = embedding_provider or HashEmbeddingProvider()
 
@@ -16,6 +27,7 @@ class RAGIndexer:
         documents = []
         for runbook in self.store.list_runbooks():
             documents.append(self._runbook_document(runbook))
+            documents.extend(self._chunk_documents(chunks_from_runbook(runbook), ref_id=str(runbook.get("runbook_id"))))
         self.store.save_rag_documents(documents)
         return documents
 
@@ -24,13 +36,15 @@ class RAGIndexer:
             self._rca_document(result),
             self._evidence_document(result),
         ]
+        documents.extend(self._chunk_documents(chunks_from_rca_result(result), ref_id=result.incident_id))
         self.store.save_rag_documents(documents)
         return documents
 
     def index_agent_report(self, report: RCAAgentReport) -> list[RAGDocument]:
-        document = self._agent_report_document(report)
-        self.store.save_rag_documents([document])
-        return [document]
+        documents = [self._agent_report_document(report)]
+        documents.extend(self._chunk_documents(chunks_from_agent_report(report), ref_id=report.incident_id))
+        self.store.save_rag_documents(documents)
+        return documents
 
     def rebuild(self, limit: int = 200) -> dict[str, Any]:
         docs: list[RAGDocument] = []
@@ -183,6 +197,38 @@ class RAGIndexer:
             embedding=self.embedding_provider.embed(content),
             metadata=metadata or {},
         )
+
+    def _chunk_documents(
+        self,
+        chunks: list[TypedEvidenceChunk],
+        *,
+        ref_id: str,
+    ) -> list[RAGDocument]:
+        documents: list[RAGDocument] = []
+        for chunk in chunks:
+            metadata = {
+                **chunk.metadata,
+                "chunk_id": chunk.chunk_id,
+                "chunk_kind": chunk.source_type,
+                "evidence_event_ids": chunk.evidence_ids,
+                "event_ids": chunk.evidence_ids,
+                "time_range": chunk.time_range,
+                "evidence_strength": "strong" if chunk.evidence_ids else "weak",
+            }
+            documents.append(
+                self._document(
+                    source_type=chunk.source_type,
+                    ref_id=chunk.incident_id or ref_id,
+                    title=chunk.title,
+                    content=chunk.content,
+                    incident_id=chunk.incident_id,
+                    service=chunk.service,
+                    env=chunk.env,
+                    severity=chunk.severity,
+                    metadata=metadata,
+                )
+            )
+        return documents
 
 
 def _top_root_cause_text(result: RCAResult) -> str:

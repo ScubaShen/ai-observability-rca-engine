@@ -37,6 +37,7 @@ def verify_answer(answer: str, matches: list[KnowledgeMatch], citations: list[Ci
     lowered = answer.lower()
     blocked = [term for term in FORBIDDEN_TERMS if term in lowered]
     coverage = _citation_coverage(answer, citations)
+    claim_notes = claim_guardrail_notes(answer, citations)
     notes: list[str] = []
     if not matches:
         status = "missing_evidence"
@@ -53,9 +54,10 @@ def verify_answer(answer: str, matches: list[KnowledgeMatch], citations: list[Ci
         notes.append("Forbidden automation language was detected and should be removed.")
     if not citations:
         notes.append("No citations were attached.")
+    notes.extend(claim_notes)
 
     risk = "low"
-    if status in {"weak", "missing_evidence"} or blocked:
+    if status in {"weak", "missing_evidence"} or blocked or claim_notes:
         risk = "high"
     elif coverage < 0.5:
         risk = "medium"
@@ -69,6 +71,32 @@ def verify_answer(answer: str, matches: list[KnowledgeMatch], citations: list[Ci
     )
 
 
+def apply_claim_guardrail(answer: str, citations: list[Citation]) -> tuple[str, list[str]]:
+    notes = claim_guardrail_notes(answer, citations)
+    if not notes:
+        return answer, []
+    evidence_ids = _citation_evidence_ids(citations)
+    if not evidence_ids:
+        return answer, notes
+    appendix = (
+        "\n\nEvidence guardrail: Treat any diagnosis or repair step without one of these "
+        f"evidence IDs as a hypothesis, not a confirmed conclusion: {', '.join(evidence_ids[:10])}."
+    )
+    if "Evidence guardrail:" in answer:
+        return answer, notes
+    return f"{answer}{appendix}", notes
+
+
+def claim_guardrail_notes(answer: str, citations: list[Citation]) -> list[str]:
+    evidence_ids = _citation_evidence_ids(citations)
+    if not evidence_ids:
+        return ["No evidence IDs were available for claim-level grounding."]
+    lowered = answer.lower()
+    if not any(evidence_id.lower() in lowered for evidence_id in evidence_ids):
+        return ["No cited evidence IDs were mentioned in the generated answer."]
+    return []
+
+
 def _citation_coverage(answer: str, citations: list[Citation]) -> float:
     if not answer.strip():
         return 0.0
@@ -76,3 +104,15 @@ def _citation_coverage(answer: str, citations: list[Citation]) -> float:
         return 0.0
     cited_sources = sum(1 for citation in citations if citation.source and citation.title)
     return round(min(cited_sources / max(len(citations), 1), 1.0), 4)
+
+
+def _citation_evidence_ids(citations: list[Citation]) -> list[str]:
+    seen: set[str] = set()
+    ids: list[str] = []
+    for citation in citations:
+        for evidence_id in citation.evidence_ids:
+            value = str(evidence_id).strip()
+            if value and value not in seen:
+                seen.add(value)
+                ids.append(value)
+    return ids

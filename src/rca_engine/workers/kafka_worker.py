@@ -21,7 +21,7 @@ from rca_engine.normalizer import NormalizationError, normalize_kafka_payload
 from rca_engine.processors.logs import extract_log_error_patterns
 from rca_engine.processors.metrics import MetricAnomalyDetector
 from rca_engine.processors.traces import extract_trace_events
-from rca_engine.rag.embedding import HashEmbeddingProvider
+from rca_engine.rag.embedding import build_embedding_provider
 from rca_engine.rag.indexer import RAGIndexer
 from rca_engine.rca.orchestrator import RCAOrchestrator
 from rca_engine.storage.factory import build_storage
@@ -44,7 +44,14 @@ class KafkaRCAWorker:
         self.agent_orchestrator = RCAAgentOrchestrator()
         self.rag_indexer = RAGIndexer(
             self.store,
-            embedding_provider=HashEmbeddingProvider(dimensions=settings.rag_embedding_dimensions),
+            embedding_provider=build_embedding_provider(
+                provider=settings.rag_embedding_provider,
+                api_url=settings.rag_embedding_api_url,
+                api_key=settings.rag_embedding_api_key,
+                model=settings.rag_embedding_model,
+                dimensions=settings.rag_embedding_dimensions,
+                timeout_seconds=settings.rag_embedding_timeout_seconds,
+            ),
         )
         self.rag_indexer.index_runbooks()
         self.consumer = KafkaConsumer(

@@ -8,10 +8,12 @@ from rca_engine.models.rag import (
     CopilotResponse,
     HistoricalIncident,
     HistoricalIncidentPromotionRequest,
+    InvestigationState,
     KnowledgeMatch,
     PostmortemDraft,
     RAGDocument,
     RAGQueryTrace,
+    TypedEvidenceChunk,
     VerificationResult,
 )
 from rca_engine.models.rca import (
@@ -36,6 +38,7 @@ __all__ = [
     "HistoricalIncident",
     "HistoricalIncidentPromotionRequest",
     "IncidentCandidate",
+    "InvestigationState",
     "KnowledgeMatch",
     "NormalizedEvent",
     "PostmortemDraft",
@@ -48,5 +51,6 @@ __all__ = [
     "ServiceDependencyInsight",
     "Severity",
     "TimelineEntry",
+    "TypedEvidenceChunk",
     "VerificationResult",
 ]

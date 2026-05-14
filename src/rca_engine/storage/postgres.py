@@ -517,7 +517,35 @@ class PostgresStore:
         if incident_id:
             params["incident_id"] = incident_id
             incident_filter = "and incident_id = %(incident_id)s"
-        if channel == "keyword":
+        if channel == "current_evidence":
+            sql = f"""
+                select payload,
+                       ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)) as keyword_score,
+                       coalesce(1 - (embedding <=> %(embedding)s::vector), 0.0) as semantic_score
+                from rag_documents
+                where source_type in (
+                  'evidence_summary',
+                  'evidence_log',
+                  'evidence_metric',
+                  'evidence_trace',
+                  'timeline_event',
+                  'graph_edge'
+                )
+                and (
+                  search_text @@ plainto_tsquery('simple', %(plain_query)s)
+                  or title ilike %(query)s
+                  or content ilike %(query)s
+                  or embedding is not null
+                )
+                {incident_filter}
+                order by greatest(
+                           ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)),
+                           coalesce(1 - (embedding <=> %(embedding)s::vector), 0.0)
+                         ) desc,
+                         updated_at desc
+                limit %(limit)s
+                """
+        elif channel == "keyword":
             sql = f"""
                 select payload,
                        ts_rank_cd(search_text, plainto_tsquery('simple', %(plain_query)s)) as keyword_score,

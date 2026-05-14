@@ -1,575 +1,159 @@
-# 🔍 RAG / Copilot 設計
+# RAG / Copilot 技術設計
 
-## 目標與原則
+本文說明 Copilot RAG 如何把 RCA artifact、runbook、歷史案例與 incident graph 轉成可檢索、可引用、可降級的回答上下文。
 
-RAG 的目標不是讓 LLM 直接猜答案，而是讓 Copilot 先找到可信 evidence，再基於 evidence 產生回答、引用與 query trace。
+RAG 是 Copilot 的知識層，不是使用者需要操作或改造的功能。它不追求「把所有資料丟進向量庫」，而是讓回答對齊 operator 排查語境，並能回答：
 
-核心原則：
+> 這個判斷根據哪些 evidence？
 
-- artifact-first：索引 RCA artifact、evidence summary、runbook、historical incident 與 graph context，而不是直接索引全部 raw logs。
-- deterministic-first：召回、排序、驗證與 fallback 必須在 LLM 不可用時仍能工作。
-- LLM optional：LLM synthesis / rerank 只屬於 deep path enhancement，不取代 deterministic ranking。
-- every turn grounded：每一輪回答都必須 fresh retrieval、citation selection、verification 與 query trace。
-- safety first：缺 evidence 時應降級為 manual investigation answer，不硬生成結論。
+Evaluation 流程見 [Evaluation](evaluation.md)；回答安全邊界見 [Security](security.md)。
 
-核心流程：
+---
+
+## 目標與邊界
+
+RAG 的目標是讓 Copilot 回答可引用、可追溯、可降級。
+
+- 可引用：關鍵判斷能連回 RCA evidence、timeline、runbook 或 historical incident。
+- 可追溯：每次查詢能回放 retrieval、ranking、context selection 與 verification。
+- 可降級：向量檢索、LLM 或部分 storage 不可用時，仍能給出保守回答。
+
+RAG 不重新計算 root cause，也不替代 RCA engine。RCA engine 產生 evidence 與 hypothesis；RAG 負責把這些 artifact 變成適合問答的知識上下文。
+
+---
+
+## 整體設計
+
+RAG 採用 artifact-first，而不是 raw-telemetry-first。
 
 ```text
-Evidence Artifacts → Hybrid Retrieval → Ranking → Context → Answer → Verification → Trace
+RAG Flow
+   |
+   +--> Index：把 RCA artifact 切成 typed chunks
+   +--> Understand：辨識 query intent 與關鍵 entity
+   +--> Plan：選擇 exact / keyword / semantic / graph 等召回路徑
+   +--> Retrieve：多通道召回候選文件
+   +--> Rank：融合多通道排序與 domain signal
+   +--> Context：選出可引用上下文
+   +--> Answer：產生 fast / deep / fallback 回答
+   +--> Verify：檢查 citation 與 unsafe automation language
 ```
 
----
-
-## 端到端流程
-
-```text
-User / API
-  ↓
-Query Orchestrator
-  ↓
-Query Preprocessor
-  ├─ Entity Extractor
-  ├─ Intent Classifier
-  ├─ Bounded Query Rewriter
-  └─ Drift Checker
-  ↓
-Retrieval Orchestrator
-  ├─ Exact Lookup
-  ├─ Keyword / BM25
-  ├─ Vector Search
-  ├─ Incident / RCA Store
-  ├─ Graph Context
-  └─ Runbook Retrieval
-  ↓
-Candidate Processor
-  ├─ Dedupe
-  ├─ Source Attribution
-  ├─ Score Normalization
-  └─ Merge
-  ↓
-Ranker
-  ├─ Weighted Ranker for v1
-  └─ RRF / LTR as evolution
-  ↓
-Optional Reranker
-  ├─ Cross-Encoder or LLM Rerank
-  └─ Deterministic Fallback
-  ↓
-Context Builder
-  ├─ Citation Snippet Selector
-  ├─ Source Diversity
-  └─ Evidence Coverage Check
-  ↓
-Answer Generator
-  ├─ Template Answer
-  └─ LLM Synthesis
-  ↓
-Verifier
-  ├─ Citation Coverage
-  ├─ Evidence Consistency
-  ├─ Missing Evidence
-  └─ Automation Safety
-  ↓
-Response + Query Trace
-```
-
-這條流程的重點是把「找資料」、「排序」、「選上下文」、「生成答案」、「驗證安全性」拆開。每一層都能測試、追蹤、替換與降級。
+Raw logs、metrics、traces 噪音高且粒度不一致。RCA artifact 已經經過 normalization、correlation、evidence scoring 與 graph projection，更適合作為回答依據。
 
 ---
 
-## 1. Query Orchestrator
+## 知識建模與 Chunk 設計
 
-Query Orchestrator 負責承接 API / Console / future session input，決定本輪查詢使用 fast、deep 或 fallback path。
+Chunk 的粒度不是固定 token size，而是「operator 可以引用的一個判斷單位」。每個 chunk 保留 incident、service、env、time range、evidence id 等 metadata，讓 retrieval 與 citation 能回到具體證據。
 
-輸入：
-
-- user question
-- optional incident_id
-- mode: fast / deep / auto
-- session metadata
-
-輸出：
-
-- processed query
-- selected response path
-- query trace root
-
-v1 選型：
-
-- 保持 `CopilotRequest` 的 API shape。
-- `auto` 根據 intent 與 LLM availability 選 fast / deep。
-- cache hit 也要記錄 query trace。
-
-擴展點：
-
-- multi-turn session state
-- tenant / team policy
-- latency budget based routing
-
----
-
-## 2. Query Preprocessor
-
-Query Preprocessor 的目標是理解問題，而不是替使用者重寫成另一個問題。
-
-子模組：
-
-| 模組 | 職責 |
-| --- | --- |
-| Entity Extractor | 抽取 incident_id、service、env、trace_id、span_id、error code |
-| Intent Classifier | 判斷 root_cause、evidence、runbook、postmortem、similar_incident |
-| Bounded Query Rewriter | 只補充保守 token，不刪除原始 query 關鍵 entity |
-| Drift Checker | 檢查 rewrite 是否遺失原始 entity 或大幅偏離原 query |
-
-v1 選型：
-
-- rule-based extractor / classifier。
-- bounded rewrite 只追加 service/env/incident/error 等 token。
-- drift detected 時回退原始 query。
-
-問題點：
-
-- query rewrite 可能刪掉 incident_id、trace_id、error code。
-- LLM rewrite 可能把 operator 的追問改成看似合理但不可驗證的新問題。
-
-擴展點：
-
-- model-assisted intent classifier
-- service catalog alias resolver
-- multi-turn follow-up resolver
-
----
-
-## 3. Retrieval Orchestrator
-
-Retrieval Orchestrator 負責多路召回。RCA 場景不能只依賴 vector search，因為 incident id、error code、exception name、runbook keyword 往往更適合 exact / keyword search。
-
-| 查詢類型 | 召回方式 |
-| --- | --- |
-| incident_id / trace_id / document_id | exact lookup |
-| exception / error code / service name | keyword / PostgreSQL full-text |
-| 相似事故 | vector search / historical incident |
-| 依賴關係 / 傳播路徑 | graph context |
-| 排查步驟 | runbook retrieval |
-| 已生成 RCA | incident / RCA store |
-
-v1 選型：
-
-- 使用現有 artifact-first RAG documents。
-- keyword 目前是 PostgreSQL full-text / token overlap baseline。
-- vector 使用現有 hash embedding 作為可重現 baseline，不宣稱 production embedding。
-- graph context 作為 incident-scoped 補充召回。
-
-擴展點：
-
-- production embedding provider
-- OpenSearch / Elasticsearch / Tantivy BM25
-- graph hop expansion
-- source-specific retrieval budget
-
----
-
-## 4. Candidate Processor
-
-Candidate Processor 負責把不同 retrieval source 的結果整理成可排序候選。
-
-職責：
-
-- dedupe：合併同 source/ref_id/document_id 的重複候選。
-- source attribution：保留候選來自 exact、keyword、semantic、graph、runbook 等來源。
-- score normalization：把各召回器分數收斂到可比較區間。
-- merge：合併 score breakdown、attributes、recall sources。
-
-為什麼需要：
-
-> 不同 retrieval source 的 score 不可直接比較。Vector cosine、keyword rank、exact match、graph clue 都有不同語義，必須先標準化和保留分數拆解。
-
-v1 選型：
-
-- deterministic normalization。
-- 保留 `score_breakdown` 與 `recall_sources`。
-- query trace 記錄 source counts 與 recall source distribution。
-
-擴展點：
-
-- source-specific calibration
-- per-intent candidate budget
-- duplicate clustering by canonical incident / evidence id
-
----
-
-## 5. Ranker
-
-Ranker 負責把候選排序，不負責刪除所有非主 intent 的資料。
-
-v1 weighted ranker 考慮：
-
-- semantic score
-- keyword score
-- exact match
-- source priority
-- service / env match
-- incident match
-- evidence strength
-- intent match
-- severity
-
-設計原則：
-
-> 先多召回，再用排序降權，而不是太早誤砍資料。
-
-v1 選型：
-
-- weighted deterministic ranker。
-- 分數必須可拆解。
-- LLM 不參與核心 ranking。
-
-擴展點：
-
-- RRF fusion
-- learning-to-rank
-- feedback-aware rank adjustment
-- calibrated confidence
-
----
-
-## 6. Optional Reranker
-
-Optional Reranker 只在 deep path 使用，用來把 top-N 候選重新排序。
-
-可選方案：
-
-- cross-encoder rerank
-- LLM rerank
-- domain-specific rerank model
-
-v1 選型：
-
-- optional LLM rerank，預設關閉。
-- rerank 失敗或不可用時使用 deterministic fallback。
-- rerank strategy 必須寫入 query trace。
-
-問題點：
-
-- LLM rerank 不穩定。
-- 成本與 latency 較高。
-- 沒有 benchmark 時，很難證明 rerank 真的提升 quality。
-
-擴展點：
-
-- top 20 → top 5 cross-encoder
-- rerank budget by mode
-- rerank regression dataset
-
----
-
-## 7. Context Builder
-
-Context Builder 決定哪些 evidence 會進入回答上下文與 citation。
-
-職責：
-
-- citation snippet selector：從候選 content 中選短引用片段。
-- source diversity：避免所有 citation 來自單一 source。
-- evidence coverage check：檢查 expected / available evidence 是否被 citation 覆蓋。
-
-v1 選型：
-
-- 從 ranked matches 選 top citation。
-- 優先保留不同 source。
-- citation quote 使用短 snippet，不直接輸出長 artifact。
-
-擴展點：
-
-- claim-level evidence selection
-- per-source citation quota
-- snippet compression
-- evidence coverage scoring
-
----
-
-## 8. Answer Generator
-
-Answer Generator 有兩條路：
-
-```text
-fast path
-  → template answer
-  → citations
-  → verification
-
-deep path
-  → optional rerank
-  → LLM synthesis
-  → verification
-
-fallback path
-  → deterministic manual-investigation answer
-```
-
-v1 選型：
-
-- Template answer 是正式能力，不是錯誤狀態。
-- LLM synthesis 必須只使用 retrieved context。
-- LLM 空回覆、不可用或違反安全規則時降級 fallback。
-
-擴展點：
-
-- structured LLM output
-- postmortem draft
-- operator-specific answer templates
-- answer style policy
-
----
-
-## 9. Verifier
-
-Verifier 負責回答後檢查，避免 Copilot 把 weak evidence 講成 confirmed root cause。
-
-檢查項：
-
-- citation coverage
-- evidence consistency
-- missing evidence
-- automation safety
-
-Automation safety 必須阻止：
-
-- auto rollback
-- auto restart
-- auto scale
-- execute ticket
-- create ticket automatically
-
-v1 選型：
-
-- deterministic citation / safety checks。
-- 缺 citations 或 evidence weak 時降低 confidence。
-- forbidden automation language 觸發 fallback manual answer。
-
-擴展點：
-
-- claim-level faithfulness evaluation
-- contradiction detection
-- policy-aware safety verifier
-
----
-
-## 10. Response + Query Trace
-
-Response 給 operator，Query Trace 給 debug、evaluation 與 feedback loop。
-
-Response 包含：
-
-- answer
-- confidence
-- matches
-- citations
-- verification
-- response_path
-- suggested_followups
-
-Query Trace 包含：
-
-- original / rewritten query
-- extracted entities
-- intent
-- retrieval source counts
-- candidate processing summary
-- ranker score breakdown
-- selected citations
-- verification result
-- fallback reason
-- latency / token usage
-
-重要原則：
-
-> Query Trace 是可觀測性資料，不應被當成下一輪回答的事實來源。下一輪仍必須 fresh retrieval。
-
----
-
-## 為什麼不是 Raw-Log RAG
-
-系統不直接把 raw logs 全部丟進向量庫，原因是：
-
-- raw logs 噪音高
-- log 行通常缺少完整 incident context
-- 向量檢索容易被重複錯誤訊息污染
-- operator 真正需要的是已整理過的 evidence / RCA / runbook
-- raw telemetry 需要先經過 normalization、signal extraction、incident correlation
-
-因此採用 artifact-first indexing。
-
-主要索引來源：
-
-- runbook
-- RCA result
-- evidence summary
-- RCA agent report
-- promoted historical incident
-- graph context
-
----
-
-## 主要問題點
-
-| 問題 | 風險 | 對策 |
+| Chunk type | 用途 | 設計取捨 |
 | --- | --- | --- |
-| raw-log RAG | 噪音高、context 不完整 | artifact-first indexing |
-| 單一路徑 vector search | 漏掉 incident id、error code、runbook | exact + keyword + vector + graph |
-| query rewrite 漂移 | 刪掉關鍵 entity | bounded rewrite + drift checker |
-| LLM rerank 不穩定 | 排序不可重現 | deterministic ranker first |
-| citation coverage 不足 | 答案看似合理但無證據 | verifier 降級 |
-| automation language | 產生危險操作建議 | automation safety check |
-| 沒有 benchmark | 無法證明 quality 提升 | offline eval dataset + runner |
+| `evidence_log` | 錯誤訊息、exception、錯誤碼 | 適合 keyword / exact recall，但需依賴 RCA scoring 過濾噪音 |
+| `evidence_metric` | latency、error rate、queue、resource anomaly | 適合回答「什麼指標異常」，單獨不推論根因 |
+| `evidence_trace` | slow span、trace error、dependency span | 適合連接服務與下游依賴，但仍只是 evidence |
+| `timeline_event` | incident 內事件順序 | 用於先後關係與第一個異常訊號 |
+| `graph_edge` | dependency insight 與可疑關係 | 提供依賴線索，不代表強因果證明 |
+| `runbook_step` | 人工排查步驟 | 作排查建議，不當成本次 incident evidence |
+| `agent_finding` | specialist finding 與 follow-up | 補充專家觀察，仍需 citation 與 verification |
+
+不使用整篇 incident report 作為唯一 chunk，因為長文會混合 root cause、timeline、evidence 與建議，難以精準引用；也不直接索引每條 raw log，避免候選集合被低價值噪音淹沒。
 
 ---
 
-## 選型
+## Query Understanding 與意圖識別
 
-| 決策 | v1 選型 | 原因 | 演進 |
-| --- | --- | --- | --- |
-| Query preprocess | rule-based | 可測、可解釋、低風險 | model-assisted classifier |
-| Query rewrite | bounded append-only | 防止 drift | multi-turn resolver |
-| Keyword retrieval | PostgreSQL full-text / token baseline | 現有系統可落地 | BM25 provider |
-| Vector retrieval | hash embedding baseline | 可重現、無外部依賴 | production embedding |
-| Ranking | weighted deterministic | 可拆解、可降級 | RRF / LTR |
-| Rerank | optional deep path | 控制成本與 latency | cross-encoder |
-| Answer | template + optional LLM | LLM 不可用仍能回答 | richer synthesis |
-| Verification | deterministic checks | 安全、可測 | faithfulness evaluator |
-
----
-
-## 版本演進
-
-### Current / v0 Baseline
-
-目前已具備：
-
-- artifact-first indexing
-- hybrid retrieval skeleton
-- deterministic weighted ranker
-- optional LLM synthesis / rerank
-- citation + verification
-- query trace + feedback
-
-但仍缺少完整獨立的 query preprocess、candidate processing、context building 與 offline benchmark。
-
-### V1: Deterministic Production Pipeline
-
-V1 目標：
-
-- Query Preprocessor
-- Candidate Processor
-- Context Builder
-- pipeline trace
-- offline eval dataset + runner
-
-V1 不追求 80% 指標，只產生可重現 baseline。
-
-### V2: Retrieval Quality Evolution
-
-V2 目標：
-
-- production embedding provider
-- BM25 provider
-- RRF fusion
-- larger benchmark dataset
-- retrieval quality tuning
-
-到 V2 才能開始誠實描述：
+Query understanding 的任務不是把問題改寫得更漂亮，而是保住精確線索，並判斷應該優先查哪一類知識。
 
 ```text
-Recall@5 improved from X to Y on internal eval set.
+Query Understanding
+   |
+   +--> Intent：root cause、證據、runbook、歷史案例或 postmortem
+   +--> Entity：incident id、trace id、error code、endpoint、metric、dependency
+   +--> Rewrite：只做 bounded append，不改掉原始 query
+   +--> Drift check：確保 entity 沒有在改寫後遺失
 ```
 
-### V3: Learned / Calibrated System
+目前採 deterministic keyword / regex / bounded rewrite，讓同一個 query 可以重放出同一個 retrieval plan，也方便 regression test。
 
-V3 目標：
+| Intent | 問題類型 | Retrieval 偏好 |
+| --- | --- | --- |
+| `root_cause` | 最可能根因是什麼 | RCA artifact、current evidence、graph |
+| `evidence` | 有哪些證據支持判斷 | current evidence、timeline |
+| `runbook` | 接下來怎麼人工排查 | runbook step、相關 evidence |
+| `similar_incident` | 有沒有相似歷史問題 | historical incident、semantic |
+| `postmortem` | 如何整理事故敘述 | RCA artifact、timeline、citation context |
+| `general` | 未明確分類的問題 | keyword、semantic、artifact |
 
-- learning-to-rank
-- cross-encoder rerank
-- probabilistic confidence calibration
-- claim-level faithfulness evaluation
-- feedback-driven dataset growth
-
-到 V3 才適合使用：
-
-```text
-learned ranking
-calibrated confidence
-RootCause@3
-```
+不在第一版使用 LLM intent classifier 或自由 rewrite，原因是可測試性、漂移風險、成本與可重放性。LLM 可以演進為 bounded expansion 或 rerank，但不應取代 deterministic parsing。
 
 ---
 
-## 評測與驗收
+## Retrieval Plan 與多通道召回
 
-詳細操作、指標縮寫與 baseline 驗收標準見 [Evaluation](evaluation.md)。
+RCA 查詢常同時包含精確 id、錯誤碼、模糊症狀、服務別名、歷史案例與依賴關係；單一 vector search 很難同時滿足 precision 與 recall。
 
-RAG 評測：
-
-- Recall@5
-- MRR
-- nDCG@5
-- citation coverage
-- unsupported answer rate
-- p95 latency
-
-RCA 評測：
-
-- RootCause@3
-- evidence coverage
-- missing evidence rate
-
-第一版 evaluation dataset 使用人工標註 JSONL：
-
-```json
-{
-  "query_id": "rag_checkout_exception_001",
-  "query": "How do I investigate checkout application exception?",
-  "incident_id": "incident_checkout_001",
-  "intent": "runbook",
-  "relevant_document_ids": ["doc_checkout_rca"],
-  "relevant_sources": ["rca_result", "runbook"],
-  "relevant_evidence_ids": ["event_log_1", "event_trace_1"],
-  "relevant_runbook_ids": ["rb-application-exception"],
-  "expected_root_cause_categories": ["application"]
-}
+```text
+Query Plan
+   |
+   +--> Exact：指定 incident id / runbook id
+   +--> Keyword：錯誤碼、exception、服務名
+   +--> Semantic：模糊症狀、別名、中英文混合描述
+   +--> Runbook：排查手冊
+   +--> History：歷史問題
+   +--> Graph：有依賴關係
 ```
 
-重要原則：
-
-> 沒有 benchmark 前，不宣稱 Recall@5 80% 或 RootCause@3 80%。先建立 baseline，再證明提升。
+Exact / Keyword 保住精確線索，Semantic 補足模糊描述與 domain expansion。Runbook 與 History 獨立召回，避免把人工建議或歷史案例誤當成本次 incident evidence。Graph 只提供 dependency clue，需要和 evidence、timeline、trace signal 一起解讀。
 
 ---
 
-## Multi-turn Conversation 狀態
+## Ranking、Context 與 Answer Grounding
 
-目前系統已具備：
-
-- Copilot chat
-- query trace
-- feedback collection
-- session-level observability API
-
-但嚴格來說，尚未完整實作真正的 multi-turn conversation memory。
-
-真正 multi-turn 需要：
+多通道召回後，候選文件會去重、合併 recall sources，再做融合排序。RRF 用來降低單一 channel 偏差，偏好多個 channel 都命中的候選。
 
 ```text
-load session
-  → resolve active incident / service / env / intent
-  → rewrite follow-up question
-  → drift check
-  → fresh retrieval
-  → rerank
-  → build citations
-  → answer with verification
-  → save turn
-  → update session state
+Ranking & Grounding
+   |
+   +--> normalize score
+   +--> dedupe same source / ref
+   +--> merge recall sources
+   +--> RRF fusion
+   +--> domain boost
+   +--> context selection
+   +--> citation with source / ref / evidence ids
+   +--> verification
+   +--> fallback when evidence is missing or unsafe
 ```
 
-重要原則：
+Domain boost 反映 RCA 場景的基本優先級：同 service、同 env、同 incident 的 evidence 更靠前；runbook intent 提高 runbook source；similar incident intent 提高 historical source。
 
-> Conversation history 只用來理解追問，不應被當成事實來源。每一輪回答仍必須重新 retrieval、citation verification 與 evidence grounding。
+若缺少 citation、證據不足，或出現自動 rollback / restart / scale 等不安全語言，系統會降級成更保守的 manual investigation answer。
+
+---
+
+## 設計取捨
+
+| 決策 | 好處 | 代價 |
+| --- | --- | --- |
+| artifact-first RAG | 降低 raw telemetry 噪音，回答更接近 RCA 語境 | artifact 品質會影響召回品質 |
+| typed chunk | citation 精準，retrieval 可依 intent 選資料 | chunk schema 需要隨 RCA artifact 演進 |
+| deterministic query understanding | 可測試、可重放、低成本 | 對自然語言變體的覆蓋需要持續補強 |
+| hybrid retrieval | 同時保住 precision 與 recall | retrieval trace 與 ranking 邏輯較複雜 |
+| runbook / history 分離 | 避免把建議或歷史案例誤當證據 | 回答需要清楚區分 evidence 與 reference |
+| RRF + domain boost | 降低單一路徑偏差，貼近排查優先級 | boost 權重需要透過 evaluation 校正 |
+| guarded answer | 減少 unsupported 或 unsafe 回答 | 在證據不足時回答會更保守 |
+
+---
+
+## 演進方向
+
+RAG 的演進應由觀測結果推動，而不是一開始就引入更複雜的模型。
+
+| 觀測信號 | 演進方向 |
+| --- | --- |
+| 標註 query / answer 資料穩定 | 引入 learning-to-rank，並保留 deterministic fallback |
+| semantic recall 在模糊查詢上穩定提升 | 提高 embedding 權重，但保留 exact / keyword 通道 |
+| unsupported answer rate 下降且 citation coverage 穩定 | 擴大 deep synthesis 使用範圍 |
+| 中文 query miss rate 偏高 | 優先增強中文 entity extraction 與 domain synonym |
+| historical incident 命中品質提高 | 加入 case-based recommendation，但標記為歷史參考 |

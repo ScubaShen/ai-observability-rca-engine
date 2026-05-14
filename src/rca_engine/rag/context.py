@@ -11,6 +11,7 @@ from rca_engine.models import Citation, KnowledgeMatch
 class BuiltContext:
     matches: list[KnowledgeMatch]
     citations: list[Citation]
+    evidence_chain: list[dict[str, Any]] = field(default_factory=list)
     trace: dict[str, Any] = field(default_factory=dict)
 
 
@@ -23,14 +24,21 @@ class ContextBuilder:
     ) -> BuiltContext:
         selected = _select_diverse_sources(matches, limit)
         citations = [_citation_from_match(match, query=query) for match in selected]
+        evidence_chain = [_evidence_chain_item(match, citation) for match, citation in zip(selected, citations, strict=True)]
         evidence_coverage = _evidence_coverage(selected, citations)
         trace = {
             "selected_count": len(selected),
             "source_diversity": len({match.source for match in selected}),
             "evidence_coverage": evidence_coverage,
             "selected_sources": [match.source for match in selected],
+            "evidence_chain": evidence_chain,
         }
-        return BuiltContext(matches=selected, citations=citations, trace=trace)
+        return BuiltContext(
+            matches=selected,
+            citations=citations,
+            evidence_chain=evidence_chain,
+            trace=trace,
+        )
 
 
 def _select_diverse_sources(matches: list[KnowledgeMatch], limit: int) -> list[KnowledgeMatch]:
@@ -66,6 +74,19 @@ def _citation_from_match(match: KnowledgeMatch, query: str | None = None) -> Cit
         evidence_ids=list(evidence_ids)[:10],
         quote=_snippet(match.content, query=query),
     )
+
+
+def _evidence_chain_item(match: KnowledgeMatch, citation: Citation) -> dict[str, Any]:
+    return {
+        "source": match.source,
+        "ref_id": match.ref_id,
+        "title": match.title,
+        "score": match.score,
+        "evidence_ids": citation.evidence_ids,
+        "recall_sources": match.recall_sources,
+        "chunk_kind": match.attributes.get("chunk_kind") or match.source,
+        "quote": citation.quote,
+    }
 
 
 def _snippet(content: str, limit: int = 240, query: str | None = None) -> str:

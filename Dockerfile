@@ -14,6 +14,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY tests ./tests
 COPY eval ./eval
+COPY docs ./docs
 
 RUN pip install --no-cache-dir -e ".[test]" \
     && mkdir -p /app/runtime/output

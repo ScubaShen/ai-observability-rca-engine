@@ -5,15 +5,25 @@ from typing import Any
 
 from rca_engine.models import KnowledgeMatch
 from rca_engine.rag.candidates import CandidateProcessor
-from rca_engine.rag.embedding import HashEmbeddingProvider
+from rca_engine.rag.embedding import EmbeddingProvider, HashEmbeddingProvider
 from rca_engine.rag.planner import RetrievalPlan, RetrievalPlanner
 from rca_engine.rag.preprocessor import ProcessedQuery, QueryPreprocessor
 from rca_engine.rag.query import QueryIntent
 from rca_engine.rag.ranker import RRFFusionRanker, rerank
 
 
+CURRENT_EVIDENCE_SOURCES = {
+    "evidence_summary",
+    "evidence_log",
+    "evidence_metric",
+    "evidence_trace",
+    "timeline_event",
+    "graph_edge",
+}
+
+
 class KnowledgeRetriever:
-    def __init__(self, store, embedding_provider: HashEmbeddingProvider | None = None) -> None:
+    def __init__(self, store, embedding_provider: EmbeddingProvider | None = None) -> None:
         self.store = store
         self.embedding_provider = embedding_provider or HashEmbeddingProvider()
         self.preprocessor = QueryPreprocessor()
@@ -54,6 +64,7 @@ class KnowledgeRetriever:
             ]
             ranked = rerank(fallback_candidates, processed.intent)
             ranker_strategy = "weighted_deterministic_fallback"
+        ranked = _ensure_auxiliary_diversity(ranked, window=5)
         pipeline_trace = _pipeline_trace(
             processed,
             plan,
@@ -76,6 +87,12 @@ class KnowledgeRetriever:
     def _retrieve_channels(self, plan: RetrievalPlan) -> dict[str, list[KnowledgeMatch]]:
         channels: dict[str, list[KnowledgeMatch]] = {
             "exact": self._exact_matches(plan),
+            "current_evidence": self._rag_document_matches(
+                plan.keyword_query,
+                plan.incident_id,
+                limit=plan.source_budgets["current_evidence"],
+                channel="current_evidence",
+            ),
             "keyword": self._rag_document_matches(
                 plan.keyword_query,
                 plan.incident_id,
@@ -157,6 +174,8 @@ class KnowledgeRetriever:
         for row in rows:
             source_type = str(row.get("source_type") or "rag_document")
             if channel == "historical" and source_type != "historical_incident":
+                continue
+            if channel == "current_evidence" and source_type not in CURRENT_EVIDENCE_SOURCES:
                 continue
             if channel in {"keyword", "semantic"} and source_type == "historical_incident":
                 continue
@@ -404,3 +423,23 @@ def _runbook_ids(query: str) -> list[str]:
 
 def _limit_channel(matches: list[KnowledgeMatch], limit: int) -> list[KnowledgeMatch]:
     return sorted(matches, key=lambda item: item.score, reverse=True)[:limit]
+
+
+def _ensure_auxiliary_diversity(
+    matches: list[KnowledgeMatch],
+    *,
+    window: int,
+) -> list[KnowledgeMatch]:
+    if len(matches) <= window:
+        return matches
+    head = matches[:window]
+    if any(match.source in {"runbook", "runbook_step"} for match in head):
+        return matches
+    runbook = next(
+        (match for match in matches[window:] if match.source in {"runbook", "runbook_step"}),
+        None,
+    )
+    if not runbook:
+        return matches
+    without_runbook = [match for match in matches if match is not runbook]
+    return [*without_runbook[:3], runbook, *without_runbook[3:]]

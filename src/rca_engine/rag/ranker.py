@@ -9,14 +9,20 @@ from rca_engine.rag.query import QueryIntent
 
 
 SOURCE_WEIGHTS = {
-    "rca_result": 0.18,
-    "agent_report": 0.16,
-    "evidence_summary": 0.15,
-    "rag_document": 0.14,
-    "runbook": 0.12,
-    "historical_incident": 0.12,
-    "normalized_event": 0.08,
-    "graph": 0.06,
+    "evidence_summary": 0.2,
+    "evidence_metric": 0.2,
+    "evidence_trace": 0.2,
+    "evidence_log": 0.18,
+    "timeline_event": 0.17,
+    "rca_result": 0.16,
+    "graph_edge": 0.14,
+    "graph": 0.12,
+    "agent_report": 0.1,
+    "rag_document": 0.08,
+    "runbook_step": 0.07,
+    "runbook": 0.06,
+    "historical_incident": 0.04,
+    "normalized_event": 0.12,
 }
 
 RRF_K = 60
@@ -223,6 +229,10 @@ def _domain_boost(match: KnowledgeMatch, plan: RetrievalPlan) -> dict[str, float
         intent_score += 0.18
     if plan.intent.intent == "evidence" and match.source in {
         "evidence_summary",
+        "evidence_metric",
+        "evidence_trace",
+        "evidence_log",
+        "timeline_event",
         "normalized_event",
         "rca_result",
     }:
@@ -241,6 +251,10 @@ def _domain_boost(match: KnowledgeMatch, plan: RetrievalPlan) -> dict[str, float
     elif attrs.get("evidence_event_ids") or attrs.get("event_ids"):
         evidence_strength_score = 0.06
 
+    current_evidence_score = 0.0
+    if "current_evidence" in match.recall_sources:
+        current_evidence_score = 0.12
+
     severity_score = 0.04 if attrs.get("severity") in {"critical", "error"} else 0.0
     source_priority_score = min(SOURCE_WEIGHTS.get(match.source, 0.0), 0.08)
     return {
@@ -248,6 +262,7 @@ def _domain_boost(match: KnowledgeMatch, plan: RetrievalPlan) -> dict[str, float
         "incident_match_score": incident_match_score,
         "intent_score": intent_score,
         "evidence_strength_score": evidence_strength_score,
+        "current_evidence_score": current_evidence_score,
         "severity_score": severity_score,
         "source_priority_score": source_priority_score,
     }

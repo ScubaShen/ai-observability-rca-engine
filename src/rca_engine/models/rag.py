@@ -34,6 +34,40 @@ class Citation(BaseModel):
     quote: str | None = None
 
 
+class TypedEvidenceChunk(BaseModel):
+    chunk_id: str
+    source_type: Literal[
+        "evidence_log",
+        "evidence_metric",
+        "evidence_trace",
+        "timeline_event",
+        "runbook_step",
+        "graph_edge",
+        "rca_summary",
+        "agent_finding",
+    ]
+    title: str
+    content: str
+    incident_id: str | None = None
+    service: str | None = None
+    env: str | None = None
+    severity: Severity | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    time_range: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InvestigationState(BaseModel):
+    session_id: str
+    incident_id: str | None = None
+    confirmed_facts: list[str] = Field(default_factory=list)
+    active_hypotheses: list[str] = Field(default_factory=list)
+    excluded_hypotheses: list[str] = Field(default_factory=list)
+    selected_evidence_ids: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    updated_at: str = Field(default_factory=now_utc_iso)
+
+
 class VerificationResult(BaseModel):
     status: Literal["confirmed", "likely", "weak", "missing_evidence"]
     citation_coverage: float

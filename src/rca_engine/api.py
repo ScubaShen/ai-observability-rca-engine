@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from rca_engine.config import Settings, load_settings
 from rca_engine.rag.copilot import RCACopilot
-from rca_engine.rag.embedding import HashEmbeddingProvider
+from rca_engine.rag.embedding import build_embedding_provider
 from rca_engine.rag.indexer import RAGIndexer
 from rca_engine.rag.llm import LLMSettings
 from rca_engine.rag.retriever import KnowledgeRetriever
@@ -15,7 +15,14 @@ from rca_engine.storage.factory import build_storage
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     store = build_storage(settings)
-    embedding_provider = HashEmbeddingProvider(dimensions=settings.rag_embedding_dimensions)
+    embedding_provider = build_embedding_provider(
+        provider=settings.rag_embedding_provider,
+        api_url=settings.rag_embedding_api_url,
+        api_key=settings.rag_embedding_api_key,
+        model=settings.rag_embedding_model,
+        dimensions=settings.rag_embedding_dimensions,
+        timeout_seconds=settings.rag_embedding_timeout_seconds,
+    )
     retriever = KnowledgeRetriever(store, embedding_provider=embedding_provider)
     indexer = RAGIndexer(store, embedding_provider=embedding_provider)
     copilot = RCACopilot(

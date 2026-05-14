@@ -17,8 +17,8 @@ class LLMSettings:
     provider: str = "disabled"
     api_url: str = ""
     api_key: str = ""
-    model: str = ""
-    reasoning_effort: str = "medium"
+    model: str = "gpt-5.4-mini"
+    reasoning_effort: str = "low"
     temperature: float = 0.1
     max_output_tokens: int = 1200
     timeout_seconds: float = 20.0
@@ -323,7 +323,8 @@ def _chat_messages(question: str, context: list[KnowledgeMatch]) -> list[dict[st
 def _system_prompt() -> str:
     return (
         "You are an RCA copilot. Answer only from the supplied evidence. "
-        "If evidence is insufficient, say what is missing. "
+        "Every diagnosis and repair recommendation must cite evidence_ids from the context. "
+        "If evidence is insufficient, say what is missing and mark the claim as a hypothesis. "
         "Recommend only manual investigation runbooks. "
         "Do not propose automatic rollback, restart, scale, ticket execution, "
         "or any executor workflow. Return a compact JSON object."
@@ -337,9 +338,16 @@ def _prompt(question: str, context: list[KnowledgeMatch]) -> str:
         "Evidence context:",
     ]
     for index, match in enumerate(context, start=1):
+        evidence_ids = (
+            match.attributes.get("evidence_event_ids")
+            or match.attributes.get("event_ids")
+            or []
+        )
         lines.extend(
             [
                 f"[{index}] source={match.source} ref_id={match.ref_id} title={match.title} score={match.score}",
+                f"evidence_ids={json.dumps(evidence_ids, ensure_ascii=False)}",
+                f"chunk_kind={match.attributes.get('chunk_kind') or match.source}",
                 f"recall_sources={','.join(match.recall_sources)}",
                 f"score_breakdown={json.dumps(match.score_breakdown, sort_keys=True)}",
                 match.content[:1800],
@@ -350,6 +358,11 @@ def _prompt(question: str, context: list[KnowledgeMatch]) -> str:
         [
             "Return JSON with these keys:",
             "answer: string",
+            "diagnosis: array of objects {claim, evidence_ids, confidence, status}",
+            "supporting_evidence: array of objects {evidence_id, summary, source}",
+            "repair_plan: array of objects {step, evidence_ids, manual_only}",
+            "risks: array of strings",
+            "open_questions: array of strings",
             "root_cause_summary: string",
             "supporting_citations: array of citation numbers like [1,2]",
             "missing_evidence: array of strings",

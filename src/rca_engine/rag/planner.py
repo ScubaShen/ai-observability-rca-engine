@@ -40,6 +40,7 @@ DOMAIN_EXPANSIONS = {
 
 DEFAULT_SOURCE_BUDGETS = {
     "exact": 4,
+    "current_evidence": 18,
     "keyword": 16,
     "semantic": 16,
     "artifact": 12,
@@ -86,6 +87,7 @@ class RetrievalPlanner:
             entities.setdefault("service", canonical)
 
         source_budgets = dict(DEFAULT_SOURCE_BUDGETS)
+        source_budgets["current_evidence"] = max(limit * 4, source_budgets["current_evidence"])
         source_budgets["keyword"] = max(limit * 3, source_budgets["keyword"])
         source_budgets["semantic"] = max(limit * 3, source_budgets["semantic"])
         source_budgets["artifact"] = max(limit * 2, source_budgets["artifact"])

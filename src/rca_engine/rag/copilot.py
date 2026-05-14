@@ -11,11 +11,11 @@ from rca_engine.models import (
     RAGQueryTrace,
 )
 from rca_engine.rag.context import ContextBuilder
-from rca_engine.rag.embedding import HashEmbeddingProvider
+from rca_engine.rag.embedding import EmbeddingProvider
 from rca_engine.rag.llm import LLMProvider, LLMResult, LLMSettings, build_llm_provider
 from rca_engine.rag.llm_reranker import LLMReranker
 from rca_engine.rag.retriever import KnowledgeRetriever
-from rca_engine.rag.verification import verify_answer
+from rca_engine.rag.verification import apply_claim_guardrail, verify_answer
 
 
 class RCACopilot:
@@ -24,7 +24,7 @@ class RCACopilot:
         store,
         llm_settings: LLMSettings | None = None,
         cache_ttl_seconds: int = 300,
-        embedding_provider: HashEmbeddingProvider | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
         llm_provider: LLMProvider | None = None,
     ) -> None:
         self.store = store
@@ -80,11 +80,13 @@ class RCACopilot:
         built_context = self.context_builder.build(matches, query=request.question)
         citations = built_context.citations
         pipeline_trace["context_builder"] = built_context.trace
+        answer, claim_guard_notes = apply_claim_guardrail(answer, citations)
         verification = verify_answer(answer, matches, citations)
         if verification.blocked_terms:
             response_path = "fallback"
             answer = _compose_answer(request.question, matches)
             answer += "\n\nAutomatic execution is out of scope. Use manual investigation and runbook steps only."
+            answer, claim_guard_notes = apply_claim_guardrail(answer, citations)
             verification = verify_answer(answer, matches, citations)
             fallback_reason = "forbidden_automation_language"
         pipeline_trace["answer_generator"] = {"response_path": response_path}
@@ -93,6 +95,7 @@ class RCACopilot:
             "citation_coverage": verification.citation_coverage,
             "hallucination_risk": verification.hallucination_risk,
             "blocked_terms": verification.blocked_terms,
+            "claim_guard_notes": claim_guard_notes,
         }
 
         structured = llm_result.structured if llm_result else {}
@@ -180,10 +183,12 @@ class RCACopilot:
             fallback_reason = "stream_empty"
             yield "event: answer\n"
             yield f"data: {answer}\n\n"
+        answer, claim_guard_notes = apply_claim_guardrail(answer, citations)
         verification = verify_answer(answer, matches, citations)
         if verification.blocked_terms:
             answer = _compose_answer(request.question, matches)
             answer += "\n\nAutomatic execution is out of scope. Use manual investigation and runbook steps only."
+            answer, claim_guard_notes = apply_claim_guardrail(answer, citations)
             verification = verify_answer(answer, matches, citations)
             fallback_reason = "forbidden_automation_language"
             yield "event: answer\n"
@@ -196,6 +201,7 @@ class RCACopilot:
             "citation_coverage": verification.citation_coverage,
             "hallucination_risk": verification.hallucination_risk,
             "blocked_terms": verification.blocked_terms,
+            "claim_guard_notes": claim_guard_notes,
         }
         latency_ms = int((time.monotonic() - started) * 1000)
         response = CopilotResponse(
